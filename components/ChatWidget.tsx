@@ -24,7 +24,7 @@ const ToastContainer = dynamic(() => import('@/components/ToastContainer').then(
 const PREDEFINED_QUESTIONS = [
     { label: 'Opening Hours', text: 'When are you open?', icon: <ClockIcon size={12} /> },
     { label: 'Contact Info', text: 'What is your address and phone number?', icon: <Phone size={12} /> },
-    { label: 'Full Menu', text: 'Show me the full menu', icon: <Utensils size={12} /> },
+    { label: 'Menu', text: 'Show me the full menu', icon: <Utensils size={12} /> },
 ];
 
 interface ChatWidgetProps {

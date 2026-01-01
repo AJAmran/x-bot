@@ -18,11 +18,23 @@ export const StorageService = {
       const data = localStorage.getItem(CHAT_KEY);
       if (!data) return [];
       const parsed = JSON.parse(data);
-      // Convert date strings back to Date objects
-      return parsed.map((m: any) => ({
+
+      const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+
+      const validMessages = parsed.filter((m: any) => {
+        const msgTime = new Date(m.timestamp).getTime();
+        return msgTime > sevenDaysAgo;
+      }).map((m: any) => ({
         ...m,
         timestamp: new Date(m.timestamp)
       }));
+
+      // If messages were filtered out, update storage
+      if (validMessages.length < parsed.length) {
+        localStorage.setItem(CHAT_KEY, JSON.stringify(validMessages));
+      }
+
+      return validMessages;
     } catch (e) {
       console.error('Failed to load chat', e);
       return [];
