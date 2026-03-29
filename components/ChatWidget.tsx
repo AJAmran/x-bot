@@ -10,7 +10,7 @@ import { ChatMessage as ChatMessageType, Order, OrderAction } from '@/lib/types'
 import { useCart } from '@/lib/hooks/useCart';
 import { useChat } from '@/lib/hooks/useChat';
 import { ChatMessage } from '@/components/ChatMessage';
-import { getGeminiResponse } from '@/lib/gemini';
+import { getLogicResponse } from '@/lib/engine';
 import { ChatService } from '@/lib/chatService';
 
 // Dynamically import heavy components
@@ -70,7 +70,11 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false }: C
 
     const toggleListening = () => {
         if (recognitionRef.current) {
-            isListening ? recognitionRef.current.stop() : recognitionRef.current.start();
+            if (isListening) {
+                recognitionRef.current.stop();
+            } else {
+                recognitionRef.current.start();
+            }
         }
     };
 
@@ -83,7 +87,7 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false }: C
         else {
             const welcome: ChatMessageType = {
                 id: 'welcome',
-                content: `Assalamu Alaikum! Welcome to **${RESTAURANT_DATA.restaurant.name}**.\n\nI am **SeasonBot**, your personal waiter. How can I help you today?`,
+                content: `Assalamu Alaikum! Welcome to **${RESTAURANT_DATA.restaurant.name}**.\n\nI am **SeasonBot**, your personal waiter. How may I assist you with your dining experience?`,
                 sender: 'ai',
                 timestamp: new Date(),
                 type: 'text'
@@ -223,7 +227,7 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false }: C
                 return;
             }
 
-            const response = await getGeminiResponse([...messages, userMsg], currentOrder);
+            const response = await getLogicResponse([...messages, userMsg], currentOrder);
             addMessage({
                 id: (Date.now() + 1).toString(),
                 content: response.text,
@@ -341,7 +345,7 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false }: C
                                                 value={input}
                                                 onChange={(e) => setInput(e.target.value)}
                                                 onKeyDown={(e) => e.key === 'Enter' && handleSend(input)}
-                                                placeholder="Ask SeasonBot anything..."
+                                                placeholder="How can SeasonBot help you?"
                                                 className="w-full bg-transparent border-none pl-6 pr-24 py-5 text-sm font-bold focus:outline-none placeholder:text-slate-300"
                                             />
                                             <div className="absolute right-2 flex items-center gap-1">

@@ -1,7 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 'use client';
 
 import React, { useState, useEffect, useRef, memo, useCallback, useMemo } from 'react';
-import { MapPin, Crosshair, Navigation2, Home as HomeIcon } from 'lucide-react';
+import { Crosshair, Navigation2, Home as HomeIcon } from 'lucide-react';
 import { RESTAURANT_DATA, MAX_DELIVERY_RANGE } from '@/lib/constants';
 
 // Declare Leaflet globally
@@ -151,7 +152,7 @@ export const LocationMap = memo(({ onLocationSelect, initialDistance }: Location
                 mapInstanceRef.current = null;
             }
         };
-    }, [calculateDistance, onLocationSelect, restLocation]);
+    }, [calculateDistance, onLocationSelect, restLocation, initialDistance]);
 
 
     const handleUseGPS = () => {

@@ -6,6 +6,7 @@ const ORDER_KEY = 'fourseason_order_draft';
 
 export const StorageService = {
   saveChatSession: (messages: ChatMessage[]) => {
+    if (typeof window === 'undefined') return;
     try {
       localStorage.setItem(CHAT_KEY, JSON.stringify(messages));
     } catch (e) {
@@ -14,6 +15,7 @@ export const StorageService = {
   },
 
   loadChatSession: (): ChatMessage[] => {
+    if (typeof window === 'undefined') return [];
     try {
       const data = localStorage.getItem(CHAT_KEY);
       if (!data) return [];
@@ -42,6 +44,7 @@ export const StorageService = {
   },
 
   saveOrderDraft: (order: Order) => {
+    if (typeof window === 'undefined') return;
     try {
       localStorage.setItem(ORDER_KEY, JSON.stringify(order));
     } catch (e) {
@@ -50,6 +53,7 @@ export const StorageService = {
   },
 
   loadOrderDraft: (): Order | null => {
+    if (typeof window === 'undefined') return null;
     try {
       const data = localStorage.getItem(ORDER_KEY);
       if (!data) return null;
@@ -65,10 +69,12 @@ export const StorageService = {
   },
 
   clearOrderDraft: () => {
+    if (typeof window === 'undefined') return;
     localStorage.removeItem(ORDER_KEY);
   },
 
   clearSession: () => {
+    if (typeof window === 'undefined') return;
     localStorage.removeItem(CHAT_KEY);
     localStorage.removeItem(ORDER_KEY);
   }

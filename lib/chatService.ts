@@ -1,57 +1,10 @@
-import { ChatMessage, AIResponse, MenuItem } from "./types";
+import { ChatMessage, AIResponse } from "./types";
 import { RESTAURANT_DATA } from "./constants";
-
-/**
- * Pre-processed list of all menu items for efficient searching.
- * Initialized once at module load.
- */
-const ALL_MENU_ITEMS: MenuItem[] = (() => {
-  const items: MenuItem[] = [];
-  RESTAURANT_DATA.menu.categories.forEach(cat => {
-    if (cat.items) items.push(...cat.items);
-    if (cat.subcategories) {
-      cat.subcategories.forEach(sub => items.push(...sub.items));
-    }
-  });
-  return items;
-})();
-
-const STOP_WORDS = new Set(['the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'and', 'or', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'can', 'could', 'should', 'would', 'will', 'may', 'might', 'must', 'me', 'my', 'i', 'we', 'you', 'it', 'this', 'that', 'show', 'give', 'want', 'need', 'add', 'please', 'full', 'dish']);
-
-/**
- * Calculates a relevance score for a query against a target string.
- * Uses optimized string matching and word boundary checks.
- */
-const calculateRelevanceScore = (query: string, target: string): number => {
-  const qClean = query.toLowerCase().replace(/[^\w\s]/g, '');
-  const tClean = target.toLowerCase();
-
-  if (!qClean) return 0;
-
-  // Exact substring match (high priority)
-  if (tClean.includes(qClean)) return 5;
-
-  const queryWords = qClean.split(/\s+/).filter(w => w.length > 2 && !STOP_WORDS.has(w));
-  if (queryWords.length === 0) return 0;
-
-  let score = 0;
-  for (const word of queryWords) {
-    if (tClean === word) {
-      score += 4;
-    } else if (new RegExp(`\\b${word}\\b`).test(tClean)) {
-      score += 2;
-    } else if (tClean.includes(word) && word.length > 4) {
-      score += 0.5;
-    }
-  }
-
-  return score;
-};
 
 export const ChatService = {
   /**
    * Fast local intent parser. Handles navigation, contact info, and simple ordering
-   * without calling the LLM, saving time and API costs.
+   * without calling the core engine, saving time and API costs.
    */
   checkStaticIntent: (text: string): AIResponse | null => {
     const raw = text.toLowerCase().trim();
@@ -110,12 +63,12 @@ export const ChatService = {
       return { text: "Opening the full menu for you! 📖", orderAction: { action: 'browse_menu' } };
     }
 
-    // Ordering is handled by Gemini for better conversational flow
+    // Ordering is handled by SeasonCore for better conversational flow
     return null;
   },
 
   /**
-   * Final fallback if Gemini AI is unavailable.
+   * Final fallback if SeasonCore is unavailable.
    */
   getChatResponse: async (history: ChatMessage[]): Promise<AIResponse> => {
     const last = history[history.length - 1]?.content || "";

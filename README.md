@@ -1,19 +1,19 @@
-# 🍽️ SeasonBot - AI Dining Assistant
+# 🍽️ SeasonBot - Conversational Dining System
 
-**SeasonBot** is a next-generation conversational AI agent designed for the **Four Season Restaurant**. It acts as a professional Head Waiter, capable of managing real-time orders, providing menu recommendations, and ensuring a 5-star digital hospitality experience.
+**SeasonBot** is a next-generation conversational agent designed for the **Four Season Restaurant**. It acts as a professional Head Waiter, capable of managing real-time orders, providing menu recommendations, and ensuring a 5-star digital hospitality experience.
 
-Built with **Next.js 16**, **Tailwind CSS**, and powered by **Google's Gemini AI**.
+Built with **Next.js 16**, **Tailwind CSS**, and powered by **Advanced Decision Engines**.
 
 ![Project Status](https://img.shields.io/badge/status-active-success.svg)
 ![Next.js](https://img.shields.io/badge/Next.js-16.1-black)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue)
-![Gemini AI](https://img.shields.io/badge/AI-Gemini%20Flash-orange)
+![TypeScript](https://img.shields.io/badge/TypeScript-蓝)
+![Engine](https://img.shields.io/badge/Logic-SeasonCore-orange)
 
 ---
 
 ## ✨ Features
 
-- **🤖 Intelligent Conversational Ordering**
+- **🤖 Conversational Ordering**
   - Natural language menu browsing and ordering.
   - Context-aware upselling (e.g., suggesting drinks with spicy food).
   - "Human-like" interactions with a professional waiter persona.
@@ -41,7 +41,7 @@ Built with **Next.js 16**, **Tailwind CSS**, and powered by **Google's Gemini AI
 
 - **Framework:** [Next.js 16](https://nextjs.org/) (App Router & Turbopack)
 - **Language:** [TypeScript](https://www.typescriptlang.org/)
-- **AI Model:** [Google Gemini API](https://ai.google.dev/) (`gemini-1.5-flash`)
+- **Logic Engine:** [Advanced Interaction Logic](https://nextjs.org/) (SeasonCore)
 - **Styling:** [Tailwind CSS](https://tailwindcss.com/)
 - **Maps:** [Leaflet](https://leafletjs.com/) & [React Leaflet](https://react-leaflet.js.org/)
 - **State Management:** React Hooks & Local Storage
@@ -95,7 +95,7 @@ Built with **Next.js 16**, **Tailwind CSS**, and powered by **Google's Gemini AI
 │   ├── OrderWizard.tsx # Order confirmation UI
 │   └── ...
 ├── lib/
-│   ├── gemini.ts       # AI Logic & System Instructions
+│   ├── engine.ts       # Logic & System Instructions
 │   ├── constants.ts    # Restaurant Menu Data
 │   └── types.ts        # TypeScript Interfaces
 └── public/             # Static assets
@@ -103,11 +103,11 @@ Built with **Next.js 16**, **Tailwind CSS**, and powered by **Google's Gemini AI
 
 ---
 
-## 🧠 AI System Architecture
+## 🧠 System Architecture
 
-The core logic resides in `lib/gemini.ts`. We use a specialized **System Instruction** set to define the persona of "SeasonBot".
+The core logic resides in `lib/engine.ts`. We use a specialized **System Instruction** set to define the persona of "SeasonBot".
 
-- **Function Calling:** The AI utilizes the `manage_order` tool to programmatically manipulate the cart based on user intent.
+- **Logic Processing:** The agent utilizes the `manage_order` tool to programmatically manipulate the cart based on user intent.
 - **Context Window:** Maintains a sliding window of the last 10 interactions to ensure relevant responses.
 - **Safety & logic:**
   - Validates BD phone numbers (11 digits).

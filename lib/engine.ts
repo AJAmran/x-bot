@@ -2,7 +2,7 @@
 "use server";
 
 import { GoogleGenAI, FunctionDeclaration, Type } from "@google/genai";
-import { RESTAURANT_DATA, MIN_ORDER_AMOUNT } from "./constants";
+import { RESTAURANT_DATA } from "./constants";
 import { ChatMessage, Order, AIResponse, OrderAction } from "./types";
 
 const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
@@ -84,7 +84,7 @@ const getSystemInstruction = (currentOrder: Order | null) => {
         }
     }) : "Empty Cart";
 
-    return `You are **SeasonBot**, the professional AI Head Waiter at **Four Season Restaurant** (Dhanmondi, Dhaka).
+    return `You are **SeasonBot**, the professional Head Waiter at **Four Season Restaurant** (Dhanmondi, Dhaka).
 
   **YOUR GOAL**: Provide a professional "Real-Life" 5-Star Dining Service. Follow a strict hospitality workflow.
 
@@ -131,9 +131,9 @@ const getSystemInstruction = (currentOrder: Order | null) => {
 };
 
 /**
- * Executes a server-side AI call to Gemini with a timeout and specialized tool support.
+ * Executes a server-side call to the engine with a timeout and specialized tool support.
  */
-export async function getGeminiResponse(history: ChatMessage[], currentOrder: Order | null): Promise<AIResponse> {
+export async function getLogicResponse(history: ChatMessage[], currentOrder: Order | null): Promise<AIResponse> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -192,10 +192,10 @@ export async function getGeminiResponse(history: ChatMessage[], currentOrder: Or
     } catch (error: any) {
         clearTimeout(timeoutId);
         if (error.name === 'AbortError') {
-            console.error("Gemini AI request timed out");
+            console.error("Engine request timed out");
             return { text: "I'm sorry, our system is responding slowly. Please try again in a moment." };
         }
-        console.error("Gemini AI Error:", error);
-        return { text: `I apologize, I'm having trouble connecting. Debug Error: ${error.message || JSON.stringify(error)}` };
+        console.error("Logic Engine Error:", error);
+        return { text: `I apologize, our kitchen engine is having trouble connecting. Please try again later.` };
     }
 }

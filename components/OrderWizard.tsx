@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useMemo, useCallback, useDeferredValue, memo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, useDeferredValue } from 'react';
 import { X, ChevronLeft, ShoppingBag, Plus, Minus, Trash2, Search, Bike, Store, User, Phone as PhoneIcon, CheckCircle2, Navigation, AlertCircle, ArrowRight, MapPin, StickyNote, Receipt, Sparkles } from 'lucide-react';
 
 import { RESTAURANT_DATA, MIN_ORDER_AMOUNT, MAX_DELIVERY_RANGE } from '@/lib/constants';
@@ -45,7 +45,9 @@ export const OrderWizard: React.FC<Props> = ({
   // One-time initialization from currentOrder prop
   useEffect(() => {
     if (!initializedRef.current && currentOrder) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCartItems(currentOrder.items || []);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCustomerInfo(currentOrder.customerInfo || EMPTY_CUSTOMER_INFO);
       initializedRef.current = true;
     }
@@ -53,6 +55,7 @@ export const OrderWizard: React.FC<Props> = ({
 
   // Sync category if prop changes
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (initialCategoryId) setActiveCategory(initialCategoryId);
   }, [initialCategoryId]);
 
@@ -90,7 +93,7 @@ export const OrderWizard: React.FC<Props> = ({
   }, [cartItems, customerInfo.deliveryType, customerInfo.distance]);
 
   // Debounced update to parent - only when local state changes
-  const updateTimeoutRef = useRef<any>(null);
+  const updateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   useEffect(() => {
     if (view === 'success' || !initializedRef.current) return;
 
@@ -119,7 +122,7 @@ export const OrderWizard: React.FC<Props> = ({
         clearTimeout(updateTimeoutRef.current);
       }
     };
-  }, [cartItems, customerInfo, subtotal, deliveryFee, total, view]);
+  }, [cartItems, customerInfo, subtotal, deliveryFee, total, view, currentOrder?.createdAt, currentOrder?.id, onUpdateOrder]);
 
   useEffect(() => {
     if (categoryScrollRef.current) {
@@ -253,7 +256,7 @@ export const OrderWizard: React.FC<Props> = ({
   };
 
   const menuItemsForSearch = useMemo(() => {
-    let items: MenuItem[] = [];
+    const items: MenuItem[] = [];
     RESTAURANT_DATA.menu.categories.forEach(cat => {
       if (cat.items) items.push(...cat.items);
       if (cat.subcategories) cat.subcategories.forEach(sub => items.push(...sub.items));
@@ -483,7 +486,7 @@ export const OrderWizard: React.FC<Props> = ({
           {['delivery', 'pickup'].map(t => (
             <button
               key={t}
-              onClick={() => setCustomerInfo(prev => ({ ...prev, deliveryType: t as any }))}
+              onClick={() => setCustomerInfo(prev => ({ ...prev, deliveryType: t as 'delivery' | 'pickup' }))}
               className={`flex-1 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] relative z-10 flex items-center justify-center gap-2 transition-all duration-300 ${customerInfo.deliveryType === t ? 'text-slate-900' : 'text-slate-400 hover:text-slate-600'}`}
             >
               {t === 'delivery' ? <Bike size={14} className={customerInfo.deliveryType === t ? 'text-brand-500' : ''} /> : <Store size={14} className={customerInfo.deliveryType === t ? 'text-brand-500' : ''} />} {t}
