@@ -1,48 +1,28 @@
-'use client';
-
-import React from 'react';
-import { ChevronRight } from 'lucide-react';
 import { ChatWidget } from '@/components/ChatWidget';
+import { LandingHero } from '@/components/LandingHero';
 
-// Add WebkitSpeechRecognition type support
-declare global {
-  interface Window {
-    webkitSpeechRecognition: unknown;
-  }
-}
-
+// Server Component: the hero and widget shell are static markup, so they do not belong in the
+// client bundle. Reading the API key here also lets us tell the widget whether the AI is
+// configured without ever shipping the key to the browser.
+//
+// NOTE: because the pages are statically prerendered, the value below is baked in at BUILD
+// time — changing the key on Vercel requires a redeploy. See README "Known Limitations".
 export default function Home() {
-  return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_right,_var(--tw-gradient-stops))] from-slate-100 via-slate-50 to-brand-50/30">
-      <div className="max-w-7xl mx-auto px-6 pt-24 pb-12 flex flex-col items-center justify-center text-center">
-        <div className="inline-flex items-center gap-2 bg-white/50 backdrop-blur-xl border border-white px-4 py-2 rounded-full mb-8 shadow-sm">
-          <div className="w-2 h-2 bg-brand-500 rounded-full animate-pulse"></div>
-          <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">SeasonBot v2.0 Core</span>
+    return (
+        <div className="relative min-h-dvh overflow-hidden bg-[radial-gradient(circle_at_top_right,_var(--tw-gradient-stops))] from-slate-100 via-slate-50 to-primary/5">
+            {/*
+              Decorative light sources, painted once on the server so they cost no client JS.
+              aria-hidden and pointer-events-none: they are scenery, never content, and must not
+              swallow clicks meant for the hero CTA.
+            */}
+            <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[560px] overflow-hidden" aria-hidden="true">
+                <div className="absolute -top-32 left-[8%] size-[420px] rounded-full bg-primary/20 blur-[100px]" />
+                <div className="absolute -top-24 right-[6%] size-[380px] rounded-full bg-emerald-300/20 blur-[100px]" />
+                <div className="absolute top-40 left-1/2 size-[300px] -translate-x-1/2 rounded-full bg-lime-200/25 blur-[90px]" />
+            </div>
+
+            <LandingHero />
+            <ChatWidget aiConfigured={Boolean(process.env.GEMINI_API_KEY?.trim())} />
         </div>
-
-        <h1 className="text-5xl md:text-7xl font-black text-slate-900 tracking-tight leading-[0.9] mb-6">
-          The Future of <br />
-          <span className="text-transparent bg-clip-text bg-gradient-to-r from-brand-600 to-orange-400">Conversational</span><br />
-          Dining.
-        </h1>
-
-        <p className="max-w-2xl text-slate-500 text-lg font-medium leading-relaxed mb-10">
-          Meet SeasonBot—the next generation of hospitality. Real-time ordering,
-          intelligent location binding, and professional head-waiter intelligence,
-          all inside a stunning, responsive interface.
-        </p>
-
-        <div className="flex flex-wrap items-center justify-center gap-4">
-          <button className="bg-slate-900 text-white px-8 py-4 rounded-2xl font-black uppercase tracking-widest text-xs flex items-center gap-3 shadow-2xl shadow-slate-900/20 hover:scale-105 transition-all active:scale-95">
-            View Live Menu <ChevronRight size={16} />
-          </button>
-          <button className="bg-white text-slate-900 border border-slate-200 px-8 py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-50 transition-all active:scale-95">
-            Integration Guide
-          </button>
-        </div>
-      </div>
-
-      <ChatWidget />
-    </div>
-  );
+    );
 }

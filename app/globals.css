@@ -1,4 +1,8 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
 
 @theme {
   --font-sans: 'Outfit', var(--font-geist-sans);
@@ -44,25 +48,132 @@
   50% { transform: scale(1.2); }
 }
 
-:root {
-  --background: #f8fafc;
-  --foreground: #0f172a;
-}
-
 body {
-  background: var(--background);
-  color: var(--foreground);
   font-family: 'Outfit', sans-serif;
   margin: 0;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ---------------------------------------------------------------------------
+   Accessibility
+   --------------------------------------------------------------------------- */
+
+/**
+ * Visually hidden but available to assistive technology. Used for the labels of icon-only
+ * buttons, where an aria-label alone would be fine but a real <label> is better where possible.
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   Mobile ergonomics
+   These are the defects that only show up on a real phone, and every one of them
+   is invisible in a desktop browser.
+   --------------------------------------------------------------------------- */
+
+/**
+ * iOS zooms the page when a focused input's font-size is under 16px, and then never
+ * zooms back out — leaving the user staring at a magnified form. Raising it only on
+ * small screens keeps the desktop type scale intact.
+ */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
+/**
+ * Kills the grey/blue flash iOS and Android paint over a tapped element, which on a
+ * dark-themed widget looks like a rendering bug rather than a press.
+ */
+a,
+button,
+label,
+summary {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/**
+ * `manipulation` removes the ~300ms double-tap delay. `pan-y` is deliberately not
+ * applied to the whole page — the map needs to keep its own touch handling.
+ */
+button,
+[role='button'],
+[role='tab'] {
+  touch-action: manipulation;
+}
+
+/**
+ * Safe-area padding for notched devices. Without this the home indicator sits directly
+ * on top of the tab bar and the chat composer.
+ *   .safe-t → top    (status bar / notch, in landscape)
+ *   .safe-b → bottom (home indicator)
+ *   .safe-x → left/right (notch, in landscape)
+ */
+.safe-t {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.safe-b {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.safe-x {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/** Gap above the home indicator, combined with .safe-b. */
+.safe-b-2 {
+  padding-bottom: calc(0.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+.safe-b-4 {
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+}
+
+/**
+ * A visible focus ring on every interactive element. The UI is built from custom buttons
+ * with hover/active states only, so without this a keyboard user has no idea where they are.
+ * `:focus-visible` keeps it out of the way for pointer users.
+ */
+:focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+}
+
+/**
+ * Respect a reduced-motion preference. The design leans on animate-ping / pulse / bounce /
+ * scale throughout, which is exactly the kind of looping motion that triggers vestibular
+ * symptoms. This also neutralises Leaflet's own zoom animations.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* Custom Scrollbar - Minimal and Pro */
 ::-webkit-scrollbar {
   width: 4px;
-}
-::-webkit-scrollbar-track {
+}::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
@@ -129,4 +240,172 @@ body {
 
 .user-marker-pulse {
   animation: marker-pulse 2s infinite;
+}
+
+@theme inline {
+  /* NOTE: shadcn's generated block set `--font-sans: var(--font-sans)`, which is a
+     self-reference — it compiled to `font-family: var(--font-sans)`, which the browser
+     drops, silently losing the Outfit typeface app-wide. Point it at the real family. */
+  --font-sans: var(--font-sans);
+  --font-heading: var(--font-heading);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-primary-ink: var(--primary-ink);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/*
+ * shadcn theme, remapped onto the Four Season brand.
+ *
+ * The generated theme shipped a neutral/green palette (`--primary` was
+ * oklch(0.841 0.238 128.85) — green). Adopting shadcn components against that would have
+ * fought the orange brand on every primary action. Instead the semantic tokens reference the
+ * existing `--color-brand-*` scale, so a shadcn <Button variant="default"> and a hand-written
+ * `bg-brand-600` button are the same colour by construction and cannot drift apart.
+ */
+:root {
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+
+  --primary: oklch(0.841 0.238 128.85);
+  --primary-foreground: oklch(0.405 0.101 131.063);
+  /* The brand lime is a *fill* colour: on white it measures ~1.5:1, far below the 3:1 that
+     WCAG 1.4.11 requires of text and meaningful icons. `primary-ink` is the same hue dropped
+     to L≈0.46 (~6:1 on white) so accents stay lime on the surface without becoming
+     unreadable. Use `primary` for backgrounds, `primary-ink` for anything you can read. */
+  --primary-ink: oklch(0.46 0.135 130.5);
+
+  --secondary: oklch(0.967 0.001 286.375);
+  --secondary-foreground: oklch(0.21 0.006 285.885);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(1 0 0);
+
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  /* The focus ring was hard-coded to brand-500 in the a11y pass; keep the two identical. */
+  --ring: oklch(0.708 0 0);
+
+  --chart-1: oklch(0.897 0.196 126.665);
+  --chart-2: oklch(0.768 0.233 130.85);
+  --chart-3: oklch(0.648 0.2 131.684);
+  --chart-4: oklch(0.532 0.157 131.589);
+  --chart-5: oklch(0.453 0.124 130.933);
+
+  --radius: 0.625rem;
+
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.648 0.2 131.684);
+  --sidebar-primary-foreground: oklch(0.986 0.031 120.757);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+}
+
+/*
+ * Dark mode. The widget already renders dark surfaces (slate-950 checkout, slate-900
+ * success) by hand, so this block exists for shadcn components that read the semantic
+ * tokens. Remapped to the same brand scale rather than the generated greens.
+ *
+ * Not yet activated: there is no theme switcher. Add `class="dark"` on <html> to use it.
+ */
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+
+  --primary: oklch(0.768 0.233 130.85);
+  --primary-foreground: oklch(0.405 0.101 131.063);
+  /* Inverted rule: on a dark surface the vivid lime is the readable one, so ink follows primary. */
+  --primary-ink: oklch(0.841 0.238 128.85);
+
+  --secondary: oklch(0.274 0.006 286.033);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(1 0 0);
+
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+
+  --chart-1: oklch(0.897 0.196 126.665);
+  --chart-2: oklch(0.768 0.233 130.85);
+  --chart-3: oklch(0.648 0.2 131.684);
+  --chart-4: oklch(0.532 0.157 131.589);
+  --chart-5: oklch(0.453 0.124 130.933);
+
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.768 0.233 130.85);
+  --sidebar-primary-foreground: oklch(0.274 0.072 132.109);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
 }

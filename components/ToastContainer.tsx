@@ -1,41 +1,31 @@
 'use client';
 
-import React from 'react';
-import { CheckCircle2, AlertCircle, Info } from 'lucide-react';
+import { Toaster, toast } from '@/components/ui/toast';
 
-export interface Toast {
-    id: string;
-    message: string;
-    type: 'success' | 'error' | 'info';
+export type ToastType = 'success' | 'error' | 'info' | 'warning';
+
+/**
+ * The toast surface. shadcn's `<Toaster>` owns the whole stack — provider, portal,
+ * live-region viewport, stacking and swipe-to-dismiss — so this file no longer holds any
+ * state or markup of its own.
+ */
+export const ToastContainer = () => <Toaster />;
+
+/**
+ * Programmatic toast, called from anywhere (the chat, the order wizard, the map).
+ *
+ * This replaces a `useState<Toast[]>` + `setTimeout` pair that lived in `ChatWidget`.
+ * Two wins beyond the shorter code: the timer and the toast list are now managed by base-ui
+ * (so toasts survive re-renders and can be swiped away), and firing one no longer re-renders
+ * the entire widget — which was a real source of jank while the waiter was typing.
+ *
+ * Errors are announced urgently; everything else politely.
+ */
+export function showToast(message: string, type: ToastType = 'success', timeout = 3000): void {
+    toast.add({
+        title: message,
+        type,
+        timeout,
+        priority: type === 'error' ? 'high' : 'low',
+    });
 }
-
-interface Props {
-    toasts: Toast[];
-    removeToast: (id: string) => void;
-}
-
-export const ToastContainer: React.FC<Props> = ({ toasts }) => {
-    return (
-        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-100 flex flex-col gap-3 w-full max-w-85 px-4 pointer-events-none">
-            {toasts.map(toast => (
-                <div
-                    key={toast.id}
-                    className={`pointer-events-auto flex items-center gap-3 p-4 rounded-2xl shadow-2xl border animate-slide-up backdrop-blur-xl transition-all duration-300 ${toast.type === 'success' ? 'bg-white/95 border-green-100 text-slate-800 ring-1 ring-green-500/10' :
-                            toast.type === 'error' ? 'bg-white/95 border-red-100 text-red-800 ring-1 ring-red-500/10' :
-                                'bg-slate-900/95 border-slate-800 text-white'
-                        }`}
-                >
-                    <div className={`p-1.5 rounded-xl shrink-0 ${toast.type === 'success' ? 'bg-green-100 text-green-600' :
-                            toast.type === 'error' ? 'bg-red-100 text-red-600' :
-                                'bg-brand-600 text-white'
-                        }`}>
-                        {toast.type === 'success' && <CheckCircle2 size={16} />}
-                        {toast.type === 'error' && <AlertCircle size={16} />}
-                        {toast.type === 'info' && <Info size={16} />}
-                    </div>
-                    <p className="text-[11px] font-black uppercase tracking-widest italic">{toast.message}</p>
-                </div>
-            ))}
-        </div>
-    );
-};

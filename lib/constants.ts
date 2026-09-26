@@ -1,7 +1,37 @@
-import { RestaurantData } from "./types";
+import { RestaurantData, PaymentMethod, PaymentMethodOption } from "./types";
 
+// --- Business rules (single source of truth) ---
+// These three values are the ONLY place delivery policy is defined. They are read by
+// lib/order.ts (validation), the UI (labels/warnings) and the AI system instruction,
+// so the waiter, the checkout screen and the model can never disagree.
 export const MIN_ORDER_AMOUNT = 1000;
 export const MAX_DELIVERY_RANGE = 5; // Kilometers
+export const DELIVERY_FEE = 0; // Flat BDT — free delivery inside the service radius
+
+// --- Payment (SIMULATED) ---
+// There is no payment gateway behind this. The checkout collects a method, validates the
+// fields with the same rules a real PSP would apply, then waits a fixed moment before marking
+// the order paid. The delay exists so the flow *feels* like a real authorisation in a demo —
+// it must never be mistaken for one. A production integration has to authorise server-side
+// before an order is considered paid; see README "Known Limitations".
+export const PAYMENT_METHODS: readonly PaymentMethodOption[] = [
+    { id: 'cod', label: 'Cash on Delivery', blurb: 'Pay the rider in cash when your order arrives.', icon: 'cash' },
+    { id: 'card', label: 'Credit / Debit Card', blurb: 'Visa or Mastercard — simulated authorisation.', icon: 'card' },
+    { id: 'mobile_banking', label: 'Mobile Banking', blurb: 'bKash, Nagad or Rocket — simulated authorisation.', icon: 'wallet' },
+];
+
+/** Shown in the UI next to the payment step so nobody is misled about what this is. */
+export const PAYMENT_SIMULATED_NOTICE = 'Simulated payment — no real gateway is connected and no money moves.';
+
+/** Authorization delay, ms. Cash is quicker because there is nothing to authorise. */
+export const PAYMENT_AUTH_DELAY_MS: Record<PaymentMethod, number> = {
+    cod: 400,
+    card: 1200,
+    mobile_banking: 1200,
+};
+
+/** The classic sandbox card number, offered as a hint so a reviewer can try it immediately. */
+export const DEMO_CARD_NUMBER = '4242 4242 4242 4242';
 
 export const generateOrderId = () => {
   return 'ORD-' + Math.random().toString(36).substr(2, 9).toUpperCase();
@@ -61,6 +91,7 @@ export const RESTAURANT_DATA: RestaurantData = {
         "name": "Chinese",
         "description": "Thai, Sze-Chuan, and Chinese delicacies",
         "icon": "🥡",
+        "kind": "nested",
         "subcategories": [
           {
             "id": "appetizers",
@@ -111,23 +142,23 @@ export const RESTAURANT_DATA: RestaurantData = {
               { "id": "148", "code": "148", "name": "THAI CHICKEN WITH GARLIC & PEPPER", "description": "Sliced chicken prepared with white garlic & Thai pepper flavored sauce", "price": 725, "currency": "BDT", "tags": ["H"], "spice_level": 2, "prep_time": 20, "popular": true },
               { "id": "149", "code": "149", "name": "THAI CHICKEN WITH MUSHROOM & GINGER", "description": "Boneless sliced chicken, mushroom, onion & capsicum prepared with flavored zesty ginger", "price": 725, "currency": "BDT", "tags": ["H"], "spice_level": 1, "prep_time": 20, "popular": false },
               { "id": "150", "code": "150", "name": "THAI CHICKEN WITH GREEN CHILLI", "description": "Cube cut chicken cooked with capsicum, spring onion & green chili", "price": 725, "currency": "BDT", "tags": ["H"], "spice_level": 3, "prep_time": 20, "popular": false },
-              { "id": "150a", "code": "150", "name": "THAI SHRIMPS WITH BASIL LEAF", "description": "Shrimp with basil leaf, onion & green chili sauce", "price": 870, "currency": "BDT", "tags": ["S", "H"], "spice_level": 2, "prep_time": 20, "popular": false },
+              { "id": "150a", "code": "150a", "name": "THAI SHRIMPS WITH BASIL LEAF", "description": "Shrimp with basil leaf, onion & green chili sauce", "price": 870, "currency": "BDT", "tags": ["S", "H"], "spice_level": 2, "prep_time": 20, "popular": false },
               { "id": "151", "code": "151", "name": "THAI CHICKEN WITH CASHEW NUT", "description": "Cube cut chicken cooked with capsicum, onion, pineapple, cashew nut & low fat milk", "price": 725, "currency": "BDT", "tags": ["N", "D"], "spice_level": 1, "prep_time": 20, "popular": false },
-              { "id": "151a", "code": "151", "name": "THAI SHRIMPS RED CURRY", "description": "Shrimp cooked with Thai red curry sauce, capsicum & low fat milk", "price": 870, "currency": "BDT", "tags": ["D", "S"], "spice_level": 2, "prep_time": 20, "popular": false },
+              { "id": "151a", "code": "151a", "name": "THAI SHRIMPS RED CURRY", "description": "Shrimp cooked with Thai red curry sauce, capsicum & low fat milk", "price": 870, "currency": "BDT", "tags": ["D", "S"], "spice_level": 2, "prep_time": 20, "popular": false },
               { "id": "152", "code": "152", "name": "THAI CHICKEN WITH BASIL LEAF", "description": "Boneless Sliced chicken cooked with basil leaf, spring onion & ground pepper", "price": 725, "currency": "BDT", "tags": ["H"], "spice_level": 2, "prep_time": 20, "popular": true },
-              { "id": "152a", "code": "152", "name": "THAI BAKED SHRIMPS IN PINEAPPLE", "description": "Shrimp cooked with cashew nut, carrot, butter & tomato sauce serve in pineapple", "price": 1315, "currency": "BDT", "tags": ["N", "S", "H"], "spice_level": 1, "prep_time": 25, "popular": false },
+              { "id": "152a", "code": "152a", "name": "THAI BAKED SHRIMPS IN PINEAPPLE", "description": "Shrimp cooked with cashew nut, carrot, butter & tomato sauce serve in pineapple", "price": 1315, "currency": "BDT", "tags": ["N", "S", "H"], "spice_level": 1, "prep_time": 25, "popular": false },
               { "id": "153", "code": "153", "name": "THAI BEEF WITH GARLIC & PEPPER", "description": "Delicious dish sliced beef prepared with white garlic & pepper mixed sauce", "price": 725, "currency": "BDT", "tags": ["H"], "spice_level": 2, "prep_time": 20, "popular": false },
-              { "id": "153a", "code": "153", "name": "THAI CHICKEN RED CURRY", "description": "Boneless Sliced chicken cooked with creamy Thai red curry sauce & low fat milk", "price": 735, "currency": "BDT", "tags": ["D", "H"], "spice_level": 2, "prep_time": 20, "popular": true },
+              { "id": "153a", "code": "153a", "name": "THAI CHICKEN RED CURRY", "description": "Boneless Sliced chicken cooked with creamy Thai red curry sauce & low fat milk", "price": 735, "currency": "BDT", "tags": ["D", "H"], "spice_level": 2, "prep_time": 20, "popular": true },
               { "id": "154", "code": "154", "name": "THAI BEEF WITH MUSHROOM & GINGER", "description": "Boneless sliced beef, mushroom, onion & capsicum cooked with flavored zesty ginger", "price": 725, "currency": "BDT", "tags": ["H"], "spice_level": 1, "prep_time": 20, "popular": false },
-              { "id": "154a", "code": "154", "name": "THAI BAKED CHICKEN IN PINEAPPLE", "description": "Cube cut chicken cooked with cashew nut, pineapple, carrot, butter & tomato sauce", "price": 1150, "currency": "BDT", "tags": ["N", "H"], "spice_level": 1, "prep_time": 25, "popular": false },
+              { "id": "154a", "code": "154a", "name": "THAI BAKED CHICKEN IN PINEAPPLE", "description": "Cube cut chicken cooked with cashew nut, pineapple, carrot, butter & tomato sauce", "price": 1150, "currency": "BDT", "tags": ["N", "H"], "spice_level": 1, "prep_time": 25, "popular": false },
               { "id": "155", "code": "155", "name": "THAI BEEF WITH GREEN CHILI", "description": "Sliced beef with capsicum, onion leaves & green chili", "price": 725, "currency": "BDT", "tags": ["H"], "spice_level": 3, "prep_time": 20, "popular": false },
-              { "id": "155a", "code": "155", "name": "THAI KING PRAWN WITH GARLIC SAUCE", "description": "King prawn prepared with capsicum & garlic flavored chili sauce", "price": 1195, "currency": "BDT", "unit": "per 200g", "tags": ["S", "H"], "spice_level": 2, "prep_time": 20, "popular": false },
+              { "id": "155a", "code": "155a", "name": "THAI KING PRAWN WITH GARLIC SAUCE", "description": "King prawn prepared with capsicum & garlic flavored chili sauce", "price": 1195, "currency": "BDT", "unit": "per 200g", "tags": ["S", "H"], "spice_level": 2, "prep_time": 20, "popular": false },
               { "id": "156", "code": "156", "name": "THAI BEEF WITH BASIL LEAF", "description": "Tender beef with basil leaf, onion & green chili", "price": 725, "currency": "BDT", "tags": ["H"], "spice_level": 2, "prep_time": 20, "popular": false },
-              { "id": "156a", "code": "156", "name": "THAI SHRIMPS WITH GARLIC & PEPPER", "description": "Shrimp with white garlic & Thai pepper flavored sauce", "price": 870, "currency": "BDT", "tags": ["S", "H"], "spice_level": 2, "prep_time": 20, "popular": false },
+              { "id": "156a", "code": "156a", "name": "THAI SHRIMPS WITH GARLIC & PEPPER", "description": "Shrimp with white garlic & Thai pepper flavored sauce", "price": 870, "currency": "BDT", "tags": ["S", "H"], "spice_level": 2, "prep_time": 20, "popular": false },
               { "id": "157", "code": "157", "name": "THAI SHRIMPS WITH MUSHROOM & GINGER", "description": "Shrimp, mushroom, onion & capsicum flavored with zesty ginger", "price": 870, "currency": "BDT", "tags": ["S", "H"], "spice_level": 1, "prep_time": 20, "popular": false },
-              { "id": "157a", "code": "157", "name": "THAI BEEF RED CURRY", "description": "Sliced beef prepared with Thai red curry sauce & capsicum", "price": 755, "currency": "BDT", "tags": ["H"], "spice_level": 2, "prep_time": 20, "popular": false },
+              { "id": "157a", "code": "157a", "name": "THAI BEEF RED CURRY", "description": "Sliced beef prepared with Thai red curry sauce & capsicum", "price": 755, "currency": "BDT", "tags": ["H"], "spice_level": 2, "prep_time": 20, "popular": false },
               { "id": "158", "code": "158", "name": "CRISPY SPRING CHICKEN", "description": "Crispy battered chicken mixed with herbs and spices", "price": 615, "currency": "BDT", "tags": [], "spice_level": 1, "prep_time": 25, "popular": true },
-              { "id": "158a", "code": "158", "name": "THAI SHRIMPS WITH GREEN CHILI", "description": "Shrimp with capsicum, onion & green chili", "price": 870, "currency": "BDT", "tags": ["S", "H"], "spice_level": 3, "prep_time": 20, "popular": false },
+              { "id": "158a", "code": "158a", "name": "THAI SHRIMPS WITH GREEN CHILI", "description": "Shrimp with capsicum, onion & green chili", "price": 870, "currency": "BDT", "tags": ["S", "H"], "spice_level": 3, "prep_time": 20, "popular": false },
               { "id": "159", "code": "159", "name": "CRISPY CHICKEN DRUMSTICKS", "description": "Crumb coated deep fried chicken wings prepared with authentic herbs & spices", "price": 570, "currency": "BDT", "tags": [], "spice_level": 1, "prep_time": 25, "popular": true },
               { "id": "160", "code": "160", "name": "SZE-CHUAN SPRING CHICKEN", "description": "Chicken flavored with crust onion & mixed chilies", "price": 610, "currency": "BDT", "tags": ["H"], "spice_level": 3, "prep_time": 25, "popular": false },
               { "id": "161", "code": "161", "name": "SZE-CHUAN CHICKEN CHILI (DRY)", "description": "Crispy boneless chicken prepared with hot & spicy sze-chuan sauce", "price": 725, "currency": "BDT", "tags": [], "spice_level": 4, "prep_time": 20, "popular": true },
@@ -275,6 +306,7 @@ export const RESTAURANT_DATA: RestaurantData = {
         "name": "Bangla",
         "description": "Traditional Bengali cuisine",
         "icon": "🇧🇩",
+        "kind": "flat",
         "minimum_order": 100,
         "minimum_order_unit": "persons",
         "items": [
@@ -307,6 +339,7 @@ export const RESTAURANT_DATA: RestaurantData = {
         "name": "Beverage & Desserts",
         "description": "Refreshing drinks and sweet treats",
         "icon": "🥤",
+        "kind": "flat",
         "items": [
           { "id": "351", "code": "351", "name": "MIXED FRUIT MOCKTAIL", "description": "A mixed fruit mocktail with fresh Apples & Kiwi.", "price": 310, "currency": "BDT", "type": "mocktail", "cold": true, "tags": [] },
           { "id": "352", "code": "352", "name": "PASSION FRUIT MOJITO", "description": "An exotic concoction of passion fruit mint leaves & lime.", "price": 310, "currency": "BDT", "type": "mojito", "cold": true, "tags": [] },

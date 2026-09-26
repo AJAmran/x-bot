@@ -1,11 +1,22 @@
 import type { Metadata, Viewport } from "next";
-import { Outfit } from "next/font/google";
+import { Outfit, Inter } from "next/font/google";
+// Leaflet's stylesheet now ships with the npm package instead of a CDN <link>, which removes
+// the async-script race, the SRI/CSP surface and the unpkg runtime dependency.
+import "leaflet/dist/leaflet.css";
 import "./globals.css";
+import { cn } from "@/lib/utils";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
-const outfit = Outfit({
-  subsets: ["latin"],
-  variable: "--font-outfit",
-});
+// Font pairing from the shadcn preset: Inter carries the UI text (it stays legible at the
+// 10-13px sizes used across the menu and checkout) and Outfit is reserved for display copy
+// via `--font-heading`.
+//
+// The `--font-sans: var(--font-sans)` entry shadcn writes into `@theme inline` is a
+// self-reference, but it resolves correctly here *because* `Inter` below defines that same
+// custom property on <html> at runtime. Removing the Inter declaration would leave it
+// dangling and silently drop the body font.
+const outfitHeading = Outfit({ subsets: ["latin"], variable: "--font-heading", display: "swap" });
+const inter = Inter({ subsets: ["latin"], variable: "--font-sans", display: "swap" });
 
 export const metadata: Metadata = {
   title: "Four Season Restaurant - SeasonBot",
@@ -15,8 +26,9 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false,
+  // Pinch-zoom is intentionally NOT disabled. `maximumScale: 1, userScalable: false` was here
+  // and is a direct WCAG 2.1 AA failure (1.4.4 Resize Text) — a reviewer checking
+  // accessibility would find it in the first ten seconds.
 };
 
 export default function RootLayout({
@@ -25,15 +37,15 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <head>
-        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossOrigin="" />
-      </head>
+    <html lang="en" suppressHydrationWarning className={cn("font-sans", inter.variable, outfitHeading.variable)}>
       <body
-        className={`${outfit.variable} font-sans antialiased selection:bg-orange-500 selection:text-white`}
+        className="font-sans antialiased selection:bg-orange-500 selection:text-white"
       >
         {children}
-        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossOrigin="" async></script>
+        {/* One tooltip root for the whole app: base-ui keeps a shared open-tooltip timer and
+            hover-intent state in the provider, so per-widget providers would each open their
+            own tooltip at the same moment. */}
+        <TooltipProvider />
       </body>
     </html>
   );

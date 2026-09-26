@@ -4,6 +4,9 @@ import React, { useState, useMemo, memo } from 'react';
 import Image from 'next/image';
 import { Plus, Flame, Sparkles, Clock } from 'lucide-react';
 import { MenuItem } from '@/lib/types';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Card, CardContent, CardDescription, CardTitle } from '@/components/ui/card';
 
 interface MenuItemCardProps {
     item: MenuItem;
@@ -27,8 +30,13 @@ export const MenuItemCard = memo(({ item, onAdd, count }: MenuItemCardProps) => 
     }, [item.id]);
 
     return (
-        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm flex flex-col h-full transition-all hover:shadow-lg group overflow-hidden relative">
-            <div className={`h-28 relative overflow-hidden bg-gradient-to-br ${gradient}`}>
+        <Card size="sm" className="group h-full gap-0 overflow-hidden bg-white py-0 ring-1 ring-slate-200/70 transition-shadow hover:shadow-[0_14px_30px_-18px_rgba(15,23,42,0.5)]">
+            {/*
+              The plate is the first thing to cut: in a two-column grid it dominated the card,
+              so a shopper saw two dishes and a sliver of name. Shortening it fits roughly three
+              rows on a phone instead of two, with the name and price immediately legible.
+            */}
+            <div className={`h-20 relative overflow-hidden bg-gradient-to-br ${gradient}`}>
                 {!imgError && item.image ? (
                     <Image
                         src={item.image}
@@ -40,57 +48,72 @@ export const MenuItemCard = memo(({ item, onAdd, count }: MenuItemCardProps) => 
                     />
                 ) : (
                     <div className="w-full h-full flex flex-col items-center justify-center text-white/90 p-4">
-                        <div className="text-4xl font-bold opacity-30 select-none">{item.name.charAt(0)}</div>
+                        <div className="text-4xl font-bold opacity-30 select-none" aria-hidden="true">{item.name.charAt(0)}</div>
                     </div>
                 )}
                 <div className="absolute top-2 left-2 flex flex-col gap-1 items-start z-10">
                     {item.popular && (
-                        <span className="bg-white/90 backdrop-blur-md text-orange-600 text-[9px] px-2 py-0.5 rounded-full font-black shadow-sm uppercase flex items-center gap-1">
-                            <Flame size={8} fill="currentColor" /> Popular
-                        </span>
+                        <Badge className="shadow-sm">
+                            <Flame fill="currentColor" /> Popular
+                        </Badge>
                     )}
                     {item.tags?.includes('V') && (
-                        <span className="bg-white/90 backdrop-blur-md text-green-600 text-[9px] px-2 py-0.5 rounded-full font-black shadow-sm uppercase flex items-center gap-1">
-                            <Sparkles size={8} fill="currentColor" /> Veg
-                        </span>
+                        <Badge variant="secondary" className="shadow-sm">
+                            <Sparkles fill="currentColor" /> Veg
+                        </Badge>
                     )}
                 </div>
-                <div className="absolute bottom-2 right-2 flex flex-col items-end gap-1.5 z-10">
+                {/*
+                  Price and prep time sit side by side rather than stacked: on a short plate a
+                  two-high stack on the right and the Popular/Veg stack on the left nearly met
+                  in the middle.
+                */}
+                <div className="absolute bottom-2 right-2 flex items-center gap-1.5 z-10">
                     {item.prep_time && (
-                        <div className="bg-white/95 backdrop-blur-md px-1.5 py-0.5 rounded-md text-[9px] font-black shadow-sm text-slate-500 flex items-center gap-1 border border-slate-100">
-                            <Clock size={8} /> {item.prep_time} MINS
-                        </div>
+                        <Badge variant="outline" className="border-white/70 bg-white/90 text-[10px] font-bold text-slate-700 shadow-sm backdrop-blur">
+                            <Clock /> {item.prep_time} MINS
+                        </Badge>
                     )}
-                    <div className="bg-white/95 backdrop-blur-md px-2 py-0.5 rounded-lg text-xs font-bold shadow-sm text-slate-900 border border-slate-100">
-                        <span className="text-[10px] text-slate-500 mr-0.5">৳</span>{item.price}
-                    </div>
+                    <Badge className="px-2 text-xs font-black shadow-sm">
+                        <span className="opacity-60">৳</span>{item.price}
+                    </Badge>
                 </div>
             </div>
-            <div className="p-3 flex flex-col flex-1">
-                <h4 className="font-black text-slate-800 text-[13px] leading-tight line-clamp-2 mb-1 group-hover:text-brand-600 transition-colors uppercase tracking-tight">{item.name}</h4>
-                <p className="text-[11px] text-slate-500 line-clamp-2 mb-3 leading-relaxed font-medium opacity-80">{item.description}</p>
+            <CardContent className="flex flex-1 flex-col p-2.5">
+                <CardTitle className="group-hover:text-primary-ink mb-1 line-clamp-2 text-[13px] font-bold uppercase tracking-tight text-slate-800">
+                    {item.name}
+                </CardTitle>
+                <CardDescription className="mb-2 line-clamp-2 text-[11px] font-medium leading-relaxed text-slate-600">
+                    {item.description}
+                </CardDescription>
                 <div className="mt-auto">
-                    <button
+                    <Button
+                        type="button"
                         onClick={() => onAdd(item)}
-                        className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-[11px] font-black transition-all duration-300 relative overflow-hidden active:scale-95 uppercase tracking-widest ${count > 0
-                            ? 'bg-slate-900 text-white shadow-lg shadow-slate-500/20'
-                            : 'bg-slate-50 text-slate-700 border border-slate-200 hover:bg-brand-50 hover:border-brand-200 hover:text-brand-700'
-                            }`}
+                        // "Added" alone is ambiguous once an item is in the basket — spell out what
+                        // pressing again will do.
+                        aria-label={count > 0
+                            ? `Add another ${item.name}. ${count} already in your basket.`
+                            : `Add ${item.name} to your basket`}
+                        variant={count > 0 ? 'default' : 'outline'}
+                        className={`h-10 w-full rounded-xl text-[11px] font-semibold uppercase tracking-widest ${count > 0
+                            ? 'bg-gradient-to-br from-primary to-emerald-400 text-primary-foreground hover:brightness-105'
+                            : 'border-slate-200 text-slate-700 hover:border-primary-ink/40 hover:bg-primary/5 hover:text-primary-ink'}`}
                     >
                         {count > 0 ? (
                             <>
-                                <div className="bg-white/20 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold">{count}</div>
+                                <span className="flex size-4 items-center justify-center rounded-full bg-primary-foreground/20 text-[10px] font-bold" aria-hidden="true">{count}</span>
                                 <span>Added</span>
                             </>
                         ) : (
                             <>
-                                <Plus size={12} strokeWidth={2.5} /> Add Item
+                                <Plus strokeWidth={2.5} /> Add Item
                             </>
                         )}
-                    </button>
+                    </Button>
                 </div>
-            </div>
-        </div>
+            </CardContent>
+        </Card>
     );
 });
 
