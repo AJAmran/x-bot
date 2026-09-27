@@ -28,6 +28,12 @@ const GEOCODE_MIN_INTERVAL_MS = 1_000;
 interface LocationMapProps {
     onLocationSelect: (lat: number, lng: number, dist: number, verified: boolean, address?: string) => void;
     initialDistance?: number;
+    /**
+     * Shrinks the map for embedding inside a chat card. The full-height, 40px-radius version
+     * is built for owning a whole screen; in a 420px conversation column it left the guest
+     * scrolling past a map to reach the text around it.
+     */
+    compact?: boolean;
 }
 
 /** Great-circle distance in km (kept local — only the map needs it). */
@@ -60,7 +66,7 @@ function Recentre({ request }: { request: { position: LatLngTuple; nonce: number
     return null;
 }
 
-export const LocationMap = memo(({ onLocationSelect, initialDistance }: LocationMapProps) => {
+export const LocationMap = memo(({ onLocationSelect, initialDistance, compact = false }: LocationMapProps) => {
     const [gpsLoading, setGpsLoading] = useState(false);
   const [tilesLoaded, setTilesLoaded] = useState(false);
     const [gpsError, setGpsError] = useState<string | null>(null);
@@ -179,7 +185,7 @@ export const LocationMap = memo(({ onLocationSelect, initialDistance }: Location
     };
 
     return (
-        <div className="relative w-full h-80 rounded-[2.5rem] overflow-hidden border border-slate-200 shadow-2xl group ring-4 ring-slate-100/50">
+        <div className={`relative w-full overflow-hidden border border-slate-200 group ${compact ? 'h-48 rounded-2xl shadow-md' : 'h-80 rounded-[2.5rem] shadow-2xl ring-4 ring-slate-100/50'}`}>
             {/*
               Tiles come from a third-party CDN over a phone connection, so there is a real
               window where the container is an empty grey box. The skeleton holds the exact

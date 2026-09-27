@@ -159,7 +159,12 @@ export interface CustomerInfo {
     phone: string;
     email?: string;
     address?: string;
-    deliveryType: DeliveryType;
+    /**
+     * Optional on purpose: "not asked yet" is a real state, and collapsing it into a default
+     * would silently promise the guest a collection order (and the wrong fee) when they wanted
+     * delivery. Left unset, `validateOrder` reports `missing_delivery_type` and the waiter asks.
+     */
+    deliveryType?: DeliveryType;
     preferredTime?: string;
     notes?: string;
     /**
@@ -267,7 +272,7 @@ export interface EngineError {
 }
 
 export interface AIResponseMeta {
-    /** Where the reply came from — shown in the dev observability panel. */
+    /** Where the reply came from - shown in the dev observability panel. */
     source: 'model' | 'local' | 'fallback';
     /** False in demo mode. The client uses this for the availability banner. */
     aiAvailable: boolean;
@@ -276,7 +281,19 @@ export interface AIResponseMeta {
     latencyMs?: number;
     /** A tool call the server refused to forward (e.g. an invalid `confirm`). */
     blockedAction?: string;
+    /**
+     * Token accounting for the call, when the provider reported it. Not shown to guests, but
+     * this is the only way to see whether a model change actually costs more or less than the
+     * one the prompt was tuned for - the prompt is a fixed ~5,600 tokens of menu, so the input
+     * figure is dominated by the catalogue rather than by the conversation.
+     */
+    usage?: {
+        model: string;
+        inputTokens: number;
+        outputTokens: number;
+    };
 }
+
 
 // ---------------------------------------------------------------------------
 // Order domain (lib/order.ts) — the single source of truth for order maths
@@ -308,7 +325,7 @@ export type OrderValidationCode =
     | 'missing_phone'
     | 'invalid_phone'
     | 'missing_address'
-    | 'location_unverified'
+    | 'missing_delivery_type'
     | 'below_minimum_order'
     | 'outside_delivery_zone';
 
@@ -323,41 +340,13 @@ export type OrderValidationResult =
     | { valid: false; issues: readonly [OrderValidationIssue, ...OrderValidationIssue[]] };
 
 // ---------------------------------------------------------------------------
-// Payment (simulated — see README "Known Limitations")
+// Payment
 // ---------------------------------------------------------------------------
 
-export type PaymentMethod = 'cod' | 'card' | 'mobile_banking';
+/**
+ * The restaurant is cash on delivery. There is no gateway, so there is nothing to choose and
+ * nothing to validate — which is why this is a single-member type rather than a union the UI
+ * iterates over. Adding a real method later means widening this and reintroducing the selector.
+ */
+export type PaymentMethod = 'cod';
 
-export interface PaymentMethodOption {
-    id: PaymentMethod;
-    label: string;
-    /** One line explaining what happens with this method. */
-    blurb: string;
-    /** Key for the icon, so config stays free of React/lucide imports. */
-    icon: 'cash' | 'card' | 'wallet';
-}
-
-/** Everything the mock checkout collects. Nothing here is ever sent anywhere. */
-export interface PaymentDetails {
-    cardNumber?: string;
-    /** MM/YY */
-    expiry?: string;
-    cvc?: string;
-    /** Bangladeshi mobile wallet number. */
-    walletNumber?: string;
-}
-
-export type PaymentValidationCode =
-    | 'card_number_invalid'
-    | 'card_expiry_invalid'
-    | 'card_cvc_invalid'
-    | 'wallet_number_invalid';
-
-export interface PaymentValidationIssue {
-    code: PaymentValidationCode;
-    message: string;
-}
-
-export type PaymentValidationResult =
-    | { valid: true; issues: readonly [] }
-    | { valid: false; issues: readonly [PaymentValidationIssue, ...PaymentValidationIssue[]] };

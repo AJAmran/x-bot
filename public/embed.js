@@ -3,7 +3,39 @@
  * Usage: <script src="https://your-domain.com/embed.js"></script>
  */
 (function() {
-    const BOT_URL = window.location.origin + '/embed'; // Assumes script is hosted on same domain or adjusted
+    /*
+     * The iframe must be served by the machine that serves THIS script, not by whoever embedded
+     * it. `window.location` is the host page: a restaurant pasting this tag into their own site
+     * would have had the widget try to load `their-site.com/embed`, get a 404, and render nothing.
+     * The script's own URL is the only thing that reliably names the bot's origin.
+     */
+    let currentScript = document.currentScript;
+    if (!currentScript) {
+        // document.currentScript is null for a deferred or dynamically injected script, so fall
+        // back to finding our own tag in the DOM.
+        const scripts = document.getElementsByTagName('script');
+        for (let i = scripts.length - 1; i >= 0; i--) {
+            if ((scripts[i].src || '').indexOf('embed.js') !== -1) {
+                currentScript = scripts[i];
+                break;
+            }
+        }
+    }
+
+    const BOT_ORIGIN = (() => {
+        if (currentScript && currentScript.src) {
+            try {
+                return new URL(currentScript.src).origin;
+            } catch {
+                /* unparseable: fall through */
+            }
+        }
+        // Last resort. Same-origin beats the host page's origin here, which is never the right
+        // answer for a third-party tag.
+        return window.location.origin;
+    })();
+
+    const BOT_URL = BOT_ORIGIN + '/embed';
     
     // Create floating trigger
     const trigger = document.createElement('div');

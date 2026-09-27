@@ -81,6 +81,41 @@ export function findDuplicateCodes(): string[] {
 const categoryIds = new Set<string>(RESTAURANT_DATA.menu.categories.map(c => c.id));
 const subcategoryIds = new Set<string>(RESTAURANT_DATA.menu.categories.flatMap(c => subcategoriesOf(c).map(s => s.id)));
 
+/**
+ * Section lookups, indexed by everything a caller might plausibly send.
+ *
+ * A model asked for `category_id` answers with the section's *display* name about as often as
+ * its id — a live run sent "Chinese" where the id is "chinese", which an exact, case-sensitive
+ * check rejected, so the guest was told "I don't have a Chinese section" about a section that
+ * plainly exists. Resolving the near-misses turns a wrong-but-close answer into a right one
+ * instead of throwing it away, which is the whole point of repairing model output.
+ */
+const slug = (value: string) => value.trim().toLowerCase().replace(/[\s_]+/g, '-');
+
+const categoryAliases = new Map<string, string>();
+for (const category of RESTAURANT_DATA.menu.categories) {
+    for (const alias of [category.id, category.name]) categoryAliases.set(slug(alias), category.id);
+}
+
+const subcategoryAliases = new Map<string, string>();
+for (const category of RESTAURANT_DATA.menu.categories) {
+    for (const sub of subcategoriesOf(category)) {
+        for (const alias of [sub.id, sub.name]) subcategoryAliases.set(slug(alias), sub.id);
+    }
+}
+
+/** The real category id for whatever the caller sent, or undefined if it is not a section. */
+export function resolveCategoryId(value: unknown): string | undefined {
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return categoryAliases.get(slug(value)) ?? (categoryIds.has(value) ? value : undefined);
+}
+
+/** As `resolveCategoryId`, for subcategories. */
+export function resolveSubcategoryId(value: unknown): string | undefined {
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return subcategoryAliases.get(slug(value)) ?? (subcategoryIds.has(value) ? value : undefined);
+}
+
 /** Every menu item, flattened. Order matches the categories in the source data. */
 export const MENU_ITEMS: readonly MenuItem[] = ALL_ITEMS;
 

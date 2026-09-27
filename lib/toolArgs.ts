@@ -1,24 +1,18 @@
 /**
  * lib/toolArgs.ts — runtime validation for the `manage_order` tool call.
  *
- * The Gemini SDK types `functionCall.args` as `Record<string, unknown>`, so model output
- * arrives completely untyped. Previously it was cast straight to `OrderAction`, which meant
- * a hallucinated `item_code` was silently dropped and `quantity: -5` produced a
- * negative-total cart line. Everything the model sends is now treated as a *request* that
- * has to survive this parser before the application will act on it.
+ * The SDK types `functionCall.args` as `Record<string, unknown>`, so model output arrives
+ * completely untyped. Everything the model sends is treated as a *request* that has to survive
+ * this parser before the application will act on it.
  *
- * Design notes:
- *  - Manual guards rather than a schema library: the payload has six fixed shapes, this
- *    module is ~150 lines, and it keeps the client bundle free of another dependency. If
- *    the tool surface grows, swapping the internals for zod would not change the signature.
- *  - Unfixable data (an invented item code) is dropped and reported back to the customer in
- *    `notices`. Because the server's reply becomes part of the conversation history, the
- *    model reads its own correction on the next turn — no extra API call, which matters on
- *    a free tier with a per-project RPD ceiling.
- *  - Fixable data (a zero/negative/absent quantity) is repaired rather than rejected.
+ * Manual guards rather than a schema library: the payload has six fixed shapes and this keeps
+ * another dependency out of the client bundle. Unfixable data (an invented item code) is dropped
+ * and reported in `notices`, which the model then reads back on the next turn instead of costing
+ * another request. Fixable data (a zero, negative or absent quantity) is repaired.
  */
 
-import { findMenuItemByCode, isValidCategoryId, isValidSubcategoryId } from './menuIndex';
+import { findMenuItemByCode, resolveCategoryId, resolveSubcategoryId } from './menuIndex';
+import { isValidBdPhone, normalizeBdPhone } from './order';
 import type { DeliveryType, OrderAction, OrderToolItem } from './types';
 
 /** Guard rails so one hallucinated turn cannot ask for an unbounded amount of work. */
@@ -120,14 +114,30 @@ function parseItems(
     return items;
 }
 
-function parseCustomerDetails(raw: unknown): OrderAction['customer_details'] {
-    if (!isRecord(raw)) return undefined;
+function parseCustomerDetails(raw: unknown): { details: OrderAction['customer_details']; notices: string[] } {
+    const notices: string[] = [];
+    if (!isRecord(raw)) return { details: undefined, notices };
+
     const details: NonNullable<OrderAction['customer_details']> = {};
 
     const name = cleanText(raw.name);
     if (name) details.name = name;
-    const phone = cleanText(raw.phone);
-    if (phone) details.phone = phone;
+
+    // Normalised rather than rejected. A guest reading a number aloud, or the model echoing
+    // "01712 345678", should not have it stored in a shape the order validator will later
+    // reject — but an unparseable number is still kept, because it is often a partial one
+    // ("017") and throwing it away loses the fact that a number was given at all.
+    const rawPhone = cleanText(raw.phone);
+    if (rawPhone) {
+        const normalized = normalizeBdPhone(rawPhone);
+        if (isValidBdPhone(normalized)) {
+            details.phone = normalized;
+        } else {
+            details.phone = rawPhone;
+            notices.push('That does not look like a Bangladeshi mobile number, Sir/Ma\'am — could you give me the full 11 digits?');
+        }
+    }
+
     const address = cleanText(raw.address);
     if (address) details.address = address;
     const preferredTime = cleanText(raw.preferred_time);
@@ -146,7 +156,7 @@ function parseCustomerDetails(raw: unknown): OrderAction['customer_details'] {
         if (preferences.length > 0) details.preferences = preferences;
     }
 
-    return Object.keys(details).length > 0 ? details : undefined;
+    return { details: Object.keys(details).length > 0 ? details : undefined, notices };
 }
 
 /**
@@ -170,6 +180,12 @@ export function parseManageOrderArgs(args: unknown): ParsedToolCall {
             if (flags.clamped) {
                 notices.push(`For a single order I can only take ${MAX_QUANTITY_PER_ITEM} servings of an item, Sir/Ma'am.`);
             }
+            // A verb that came back with nothing usable would otherwise apply silently: the
+            // guest is told the item was added and their basket has not changed. Say so, so
+            // the correction reaches both them and the model on the next turn.
+            if (items.length === 0 && unknownItemCodes.length === 0) {
+                notices.push('I could not tell which dish you meant, Sir/Ma\'am — could you name it from the menu?');
+            }
             return {
                 action: { action: args.action, items },
                 unknownItemCodes,
@@ -180,25 +196,36 @@ export function parseManageOrderArgs(args: unknown): ParsedToolCall {
 
         case 'browse_menu': {
             const action: OrderAction = { action: 'browse_menu' };
+            // Resolve rather than merely validate: a model that answers "Chinese" for the
+            // `chinese` id meant the right thing, and discarding it told the guest a section
+            // does not exist when it plainly does.
             const categoryId = cleanText(args.category_id);
             const subcategoryId = cleanText(args.subcategory_id);
 
-            if (categoryId && isValidCategoryId(categoryId)) {
-                action.category_id = categoryId;
+            const resolvedCategory = resolveCategoryId(categoryId);
+            if (resolvedCategory) {
+                action.category_id = resolvedCategory;
             } else if (categoryId) {
-                // An unknown id would leave the menu tab blank, so fall back to the full menu.
+                // An id that resolves to nothing would leave the menu card blank, so fall back
+                // to the full menu and say so.
                 notices.push(`I don't have a "${categoryId}" section — let me show you the full menu instead.`);
             }
-            if (subcategoryId && isValidSubcategoryId(subcategoryId)) {
-                action.subcategory_id = subcategoryId;
+
+            const resolvedSubcategory = resolveSubcategoryId(subcategoryId);
+            if (resolvedSubcategory) {
+                action.subcategory_id = resolvedSubcategory;
+            } else if (subcategoryId) {
+                notices.push(`I don't have a "${subcategoryId}" part of the menu — here is the section instead.`);
             }
+
             return { action, unknownItemCodes, notices, clampedQuantity: false };
         }
 
         case 'update_info': {
-            const customer_details = parseCustomerDetails(args.customer_details);
+            const { details, notices: detailNotices } = parseCustomerDetails(args.customer_details);
+            notices.push(...detailNotices);
             return {
-                action: { action: 'update_info', ...(customer_details ? { customer_details } : {}) },
+                action: { action: 'update_info', ...(details ? { customer_details: details } : {}) },
                 unknownItemCodes,
                 notices,
                 clampedQuantity: false,

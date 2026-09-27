@@ -1,6 +1,6 @@
 # 🍽️ SeasonBot — Conversational Dining System
 
-**An AI head-waiter for a real restaurant.** A customer opens a chat, asks for *"two grilled chicken and a cold drink"*, and gets a validated order with delivery eligibility, a payment step and a receipt — or a floating widget embedded in someone else's website.
+**A conversational waiter for a real restaurant.** A customer opens a chat, asks for *"two grilled chicken and a cold drink"*, and gets a validated order with delivery eligibility and a receipt — or a floating widget embedded in someone else's website.
 
 Built for **Four Season Restaurant, Dhanmondi, Dhaka** (X-group). Next.js 16 · React 19 · TypeScript (strict) · Gemini 2.5 Flash tool-calling · Leaflet · Tailwind v4.
 
@@ -8,15 +8,8 @@ Built for **Four Season Restaurant, Dhanmondi, Dhaka** (X-group). Next.js 16 · 
 [![React](https://img.shields.io/badge/React-19.2-087ea4?style=flat-square&logo=react)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript)](https://www.typescriptlang.org)
 [![Tailwind](https://img.shields.io/badge/Tailwind-v4-06b6d4?style=flat-square&logo=tailwindcss)](https://tailwindcss.com)
-[![Vitest](https://img.shields.io/badge/tests-231%20passing-brightgreen?style=flat-square&logo=vitest)](https://vitest.dev)
+[![Vitest](https://img.shields.io/badge/tests-365%20passing-brightgreen?style=flat-square&logo=vitest)](https://vitest.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b?style=flat-square)](LICENSE)
-
-<p align="center">
-  <img src="docs/landing.svg" alt="SeasonBot landing page with the chat widget open" width="900">
-</p>
-
-> `docs/landing.svg` and `docs/delivery-map.svg` are **placeholders**. Replace them with real
-> screenshots (or a 45-second Loom) before sharing — see [Adding media](#adding-media).
 
 ---
 
@@ -59,8 +52,8 @@ in demo mode with no API key.
 **4. It degrades instead of breaking.**
 No API key, an exhausted quota, a 429, a timeout, a missing menu item — each is a distinct,
 typed error surfaced through `AIResponse.meta`. A visitor without a key gets a fully working menu,
-cart, map, checkout and payment with a labelled "AI temporarily unavailable" banner. **The demo
-degrades; it never white-screens.**
+cart, map and checkout with a labelled "AI temporarily unavailable" banner. **It degrades; it never
+white-screens.**
 
 **5. It gives the keys back on close.**
 Focus returns to the button that opened the widget. Escape walks out. The chat log is an ARIA
@@ -82,7 +75,7 @@ flowchart TD
     end
 
     subgraph pure["Pure domain — no React, no I/O"]
-        ORD["lib/order.ts<br/><i>totals · validateOrder<br/>validatePaymentDetails</i>"]
+        ORD["lib/order.ts<br/><i>totals · validateOrder<br/>needsCheckoutCard</i>"]
         TOOL["lib/toolArgs.ts<br/><i>parses model output</i>"]
         IDX["lib/menuIndex.ts<br/><i>code→item · integrity</i>"]
     end
@@ -132,24 +125,34 @@ guest message
 
 ```
 lib/                     the domain — all pure, all tested
-  order.ts               totals, business rules, payment validation (Luhn, expiry)
+  order.ts               totals, business rules, checkout hand-off
+  placeOrder.ts          re-prices an untrusted order payload      ["use server"]
   toolArgs.ts            runtime validation of model output
   engine.ts              Gemini call, system instruction, confirm gate  ["use server"]
+  prompt.ts              the system instruction, as pure functions
+  menuPayload.ts         compact menu serialisation for the prompt
   rateLimit.ts           in-memory token buckets
+  hours.ts               seasonal opening hours
   recommend.ts           cart-aware suggestions
   menuIndex.ts           code→item index, menu integrity checks
   chatService.ts         local intent layer + reorder
   geocode.ts             Nominatim proxy (throttled + cached)          ["use server"]
+  telegram/              kitchen notification (server-only)
   constants.ts           restaurant + menu data, business rules
   types.ts               every interface
-  hooks/                 useCart · useChat · useFocusTrap
+  hooks/                 useCart · useChat · useFocusTrap · useNow
 components/
-  ChatWidget.tsx         the shell: 3 tabs, voice, suggestions, a11y
-  OrderWizard.tsx        the 5-step order flow
+  ChatWidget.tsx         the widget shell: cards, voice, quick replies, a11y
+  chat/OrderCards.tsx    menu, basket, checkout and confirm cards
+  site/                  the public pages: header, hero, sections, footer
   wizard/                MenuItemCard · LocationMap
 app/
-  page.tsx               landing (server component) + floating widget
+  page.tsx               the restaurant page (server component) + widget
   embed/page.tsx         full-screen widget for iframe embedding
+  not-found.tsx          404
+  robots.ts · sitemap.ts
+  api/chat/              the waiter, behind the Gemini key
+  api/place-order/       prices and validates an order, then notifies
   error.tsx              route error boundary
   global-error.tsx       last-resort boundary
 public/embed.js          drop-in script for third-party sites
@@ -172,7 +175,7 @@ npm run dev                    # http://localhost:3000
 
 | Route | What it is |
 |---|---|
-| `/` | Landing page with the floating chat widget |
+| `/` | The restaurant page, with the chat widget |
 | `/embed` | Full-screen widget, designed to be iframed |
 
 ### Embedding it on another site
@@ -181,8 +184,9 @@ npm run dev                    # http://localhost:3000
 <script src="https://your-domain.com/embed.js"></script>
 ```
 
-`public/embed.js` injects a floating trigger and a 420×720 iframe. For a demo without any
-server work, also available: open `/embed` directly in a tab.
+`public/embed.js` injects a floating trigger and a 420×720 iframe. It reads its own `src` to find
+the bot's origin, so the tag works from any domain. `/embed` is the only route that may be framed
+by another site; everything else sends `X-Frame-Options: SAMEORIGIN`.
 
 ### Scripts
 
@@ -193,9 +197,9 @@ server work, also available: open `/embed` directly in a tab.
 | `npm start` | Serve the production build |
 | `npm run lint` | ESLint — currently **0 errors, 0 warnings** |
 | `npm run typecheck` | `tsc --noEmit` — **0 errors** under `strict` |
-| `npm test` | Vitest — **231 tests, ~0.4 s** |
+| `npm test` | Vitest — **365 tests, ~0.5 s** |
 
-**No API key? The app still works.** Menu, cart, map, checkout, payment, the local intent layer
+**No API key? The app still works.** Menu, cart, map, checkout, cash on delivery, the local intent layer
 and cart-aware suggestions all run. Only the conversational waiter is unavailable, and the chat
 says so. This is deliberate: it makes the deployed demo safe to share without leaking a key.
 
@@ -220,8 +224,8 @@ Not an afterthought — the widget is a keyboard-and-screen-reader-first surface
 ## Project decisions worth defending
 
 **Pure domain, thin components.** Every rule that matters — totals, minimums, radius, phone
-format, Luhn, model-output validation — lives in `lib/` with no React and no I/O. That is why the
-suite is 231 tests in under half a second with **no jsdom and no testing library**, and why the
+format, opening hours, model-output validation — lives in `lib/` with no React and no I/O. That is why the
+suite is 365 tests in well under a second with **no jsdom and no testing library**, and why the
 same function can gate a form submission and a server action.
 
 **Fail loudly on bad data.** Duplicate item codes silently made nine dishes unorderable and merged
@@ -241,20 +245,27 @@ copy and the validation logic — so the waiter, the UI and the model cannot dis
 
 ## Known limitations & roadmap
 
-Stated plainly, because a demo that pretends to be production reads worse than one that doesn't.
+Stated plainly, because a project that pretends to be finished reads worse than one that isn't.
 
 ### Deliberately out of scope
-- **No backend or database.** Orders, the chat transcript and order history live in
-  `localStorage`, so "confirmed" means confirmed *on this device*. There is no kitchen queue.
-  *Next:* Postgres + Prisma, a server action to persist, and a webhook into the existing
-  `foodbitebd` ordering platform.
-- **Payment is simulated.** No PSP is connected. Card details are validated with real rules
-  (Luhn, expiry, CVC) in the browser and the order is marked paid after a fixed 1.2 s delay.
-  **A production version must authorise server-side and only mark paid on a real gateway
-  response** — a client-side "paid" flag is not a security boundary. Labelled as simulated in the
-  UI, on the receipt, and in `PAYMENT_SIMULATED_NOTICE`.
-- **No authentication, no admin panel.** *Next:* magic-link auth and a read-only `/admin` kitchen
-  view over real orders.
+- **No database.** The transcript and order history live in `localStorage`, so order history is
+  per-device. What the kitchen receives is the Telegram notification, not a queue. *Next:* Postgres
+  + Prisma, a read-only `/admin` view, and a webhook into the existing `foodbitebd` platform.
+- **Payment is cash on delivery.** No PSP, no card form, no simulated gateway: the order is placed
+  with `paymentMethod: 'cod'` and `paymentStatus: 'pending'`, and the money changes hands with the
+  rider. Nothing is collected or stored, so there is no payment data to protect. *If a card method
+  is ever added it must be authorised server-side and marked paid only on a real gateway response.*
+- **The order is still placed from the browser.** `POST /api/place-order` re-prices every line from
+  the server's own copy of the menu, clamps quantities, re-derives totals and runs the same
+  `validateOrder` the UI uses, so a modified client cannot change what a dish costs or slip past a
+  business rule — but it can still choose *which* dishes to order, and there is no account to tie
+  an order to a person. *Next:* place the order from an authenticated server action.
+- **The kitchen endpoint is rate-limited, not authenticated.** It takes a same-origin check and a
+  per-address bucket (`consumeNotifyQuota`, 3 then 1/min, kept separate from the AI quota so
+  notification spam cannot take the chat offline). A determined caller can still forge a valid order
+  and get a message into the kitchen chat.
+- **No authentication, no admin panel.** *Next:* magic-link auth and a read-only kitchen view.
+
 - **Allergen handling is partial.** The menu carries only `S / N / H / V / D` tags, so a stated
   allergy is honoured against those (`recommend.ts` maps "allergic to prawns" → skip `S`). There is
   no full allergen or cross-contamination matrix, so **do not rely on this for a real allergy**.
@@ -298,7 +309,7 @@ Stated plainly, because a demo that pretends to be production reads worse than o
 
 ## Free services this project depends on
 
-Every one of these is free at portfolio-demo scale, with no card and no paid add-ons.
+Every one of these is free at this scale, with no card and no paid add-ons.
 
 | Service | Used for | Free tier / limit | Risk at demo scale |
 |---|---|---|---|
@@ -317,13 +328,13 @@ No paid database, no Redis, no error-tracking service, no paid fonts, no monitor
 ## Testing
 
 ```
-npm test        # 231 tests across 7 files, ~0.4s, node environment
+npm test        # 365 tests across 12 files, ~0.5s, node environment
 ```
 
 The suite covers the parts that would actually hurt if they broke: BD phone formats, the ৳1000
 delivery minimum, the 5 km radius at its exact boundary, tampered totals, hostile model output
 (negative quantities, invented codes, `[[[[[1]]]]]`), the local intent boundary between navigation
-and ordering, Luhn, the rate limiter's refill and daily reset, and the recommendation rules
+and ordering, the opening-hours logic, the rate limiter's refill and daily reset, and the recommendation rules
 including dietary filtering.
 
 It is mutation-checked: changing the radius comparison from `>` to `>=` fails the suite.
@@ -350,10 +361,4 @@ runs the same three gates plus a production build.
 
 ---
 
-### Adding media
-
-1. Record a short Loom of: opening the widget → ordering conversation → a suggestion chip →
-   the delivery map with a pinned location → the payment step.
-2. Replace `docs/landing.svg` and `docs/delivery-map.svg` with real screenshots (keep the same
-   filenames, or update the paths in this README).
-3. Drop the Loom link at the top, above the placeholder image.
+#

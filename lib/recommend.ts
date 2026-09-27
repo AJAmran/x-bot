@@ -1,17 +1,13 @@
 /**
  * lib/recommend.ts — cart-aware recommendations.
  *
- * WHY THIS IS LOCAL CODE AND NOT A PROMPT: suggestions are the single most frequent AI call in
- * an ordering flow, and the free Gemini tier allows only a handful of requests per minute for
- * the whole project. Every rule here is deterministic, explainable and testable, so it costs
- * zero API calls, returns instantly, and works in demo mode with no API key at all. The model
- * is still the thing that handles conversation; this is the part that does not need it.
+ * Local code rather than a prompt because suggestions are the most frequent call in an ordering
+ * flow and the free tier allows only a handful of requests per minute for the whole project.
+ * These rules are deterministic and testable, cost nothing, and work with no API key.
  *
- * Design rules:
- *   1. Never suggest something already in the basket.
- *   2. Never suggest something the guest has told us they cannot eat.
- *   3. Every suggestion carries a human-readable reason, so the waiter can justify it.
- *   4. If a suggestion exists that would clear the delivery minimum, prioritise that.
+ * Never suggest something already in the basket or something the guest said they cannot eat,
+ * always give a reason the waiter can read out, and prefer a dish that would clear the delivery
+ * minimum.
  */
 
 import { MENU_INDEX, lookupByCode } from './menuIndex';

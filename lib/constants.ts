@@ -1,4 +1,4 @@
-import { RestaurantData, PaymentMethod, PaymentMethodOption } from "./types";
+import { RestaurantData } from "./types";
 
 // --- Business rules (single source of truth) ---
 // These three values are the ONLY place delivery policy is defined. They are read by
@@ -7,31 +7,6 @@ import { RestaurantData, PaymentMethod, PaymentMethodOption } from "./types";
 export const MIN_ORDER_AMOUNT = 1000;
 export const MAX_DELIVERY_RANGE = 5; // Kilometers
 export const DELIVERY_FEE = 0; // Flat BDT — free delivery inside the service radius
-
-// --- Payment (SIMULATED) ---
-// There is no payment gateway behind this. The checkout collects a method, validates the
-// fields with the same rules a real PSP would apply, then waits a fixed moment before marking
-// the order paid. The delay exists so the flow *feels* like a real authorisation in a demo —
-// it must never be mistaken for one. A production integration has to authorise server-side
-// before an order is considered paid; see README "Known Limitations".
-export const PAYMENT_METHODS: readonly PaymentMethodOption[] = [
-    { id: 'cod', label: 'Cash on Delivery', blurb: 'Pay the rider in cash when your order arrives.', icon: 'cash' },
-    { id: 'card', label: 'Credit / Debit Card', blurb: 'Visa or Mastercard — simulated authorisation.', icon: 'card' },
-    { id: 'mobile_banking', label: 'Mobile Banking', blurb: 'bKash, Nagad or Rocket — simulated authorisation.', icon: 'wallet' },
-];
-
-/** Shown in the UI next to the payment step so nobody is misled about what this is. */
-export const PAYMENT_SIMULATED_NOTICE = 'Simulated payment — no real gateway is connected and no money moves.';
-
-/** Authorization delay, ms. Cash is quicker because there is nothing to authorise. */
-export const PAYMENT_AUTH_DELAY_MS: Record<PaymentMethod, number> = {
-    cod: 400,
-    card: 1200,
-    mobile_banking: 1200,
-};
-
-/** The classic sandbox card number, offered as a hint so a reviewer can try it immediately. */
-export const DEMO_CARD_NUMBER = '4242 4242 4242 4242';
 
 export const generateOrderId = () => {
   return 'ORD-' + Math.random().toString(36).substr(2, 9).toUpperCase();
@@ -428,14 +403,14 @@ export const RESTAURANT_DATA: RestaurantData = {
       "takeaway_available": true,
       "dine_in_available": true,
       "online_ordering_platform": "foodbitebd",
-      "payment_methods": ["Cash", "Card", "Mobile Banking"],
+      "payment_methods": ["Cash on Delivery"],
       "order_steps": [
         "Browse menu",
         "Select items",
         "Choose delivery/takeaway/dine-in",
         "Provide contact details",
         "Confirm order",
-        "Make payment"
+        "Pay cash on delivery"
       ]
     },
     "delivery": {

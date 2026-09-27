@@ -4,21 +4,17 @@ import { DISTINCTIVE_TOKENS, mentionsItemCode, subcategoriesOf, tokenize } from 
 import { findMenuItemByCode } from "./menuIndex";
 
 /**
- * Fast local intent parser: answers navigation/contact/hours questions without calling the
- * model, which saves latency and — on a free-tier API key — quota.
+ * Fast local intent parser: answers navigation, contact and hours questions without calling the
+ * model, which saves latency and, on a free-tier key, quota.
  *
- * These lists used to be one flat `has(...)` per branch, which made the fast path hijack real
- * orders: "time to order the sizzling beef" matched the bare word `time` and returned opening
- * hours, and "I don't know where to start" matched `where` and returned the restaurant address.
- *
- * Three rules fix that class of bug:
- *   1. **Never answer an order with a canned reply.** The pre-filter below bails out to Gemini
- *      the moment the message looks like ordering intent or names a real dish.
- *   2. **STRONG/WEAK token pairs.** Generic words ("open", "close", "time", "call") only count
- *      when corroborated; unambiguous ones ("address", "hours") stand alone.
- *   3. **Whole-word matching for short verbs.** Substring matching made "add" fire on
- *      "address" — which silently killed the entire contact branch.
+ * The risk with a fast path is that it hijacks real orders, so:
+ *   1. anything that looks like ordering intent, or names a dish we sell, is handed to Gemini;
+ *   2. generic words ("open", "close", "time", "call") only count when corroborated, while
+ *      unambiguous ones ("address", "hours") stand alone;
+ *   3. short verbs are matched as whole words, because substring matching made "add" fire on
+ *      "address" and killed the contact branch.
  */
+
 
 /** Unambiguous ordering verbs, matched as whole words. */
 const ORDER_WORDS = ['order', 'ordering', 'add', 'reserve', 'booking'];
@@ -38,7 +34,7 @@ const HOURS_CORROBORATOR = ['what', 'when', 'today', 'tomorrow', 'now', 'till', 
 /** …or in a short question, where there is no room for an order to be hiding. */
 const HOURS_SHORT_QUESTION_MAX_CHARS = 18;
 
-const NAVIGATION_VERBS = ['show', 'open', 'list', 'menu', 'browse', 'go to', 'see', 'display', 'view', 'available', 'what do you have'];
+const NAVIGATION_VERBS = ['show', 'open', 'list', 'menu', 'browse', 'go to', 'see', 'display', 'view', 'available', 'what do you have', 'do you have', 'do you serve'];
 
 /** Filler that carries no intent when comparing a message against a section name. */
 const EQUIVALENCE_FILLER = ['please', 'show', 'me', 'the', 'a', 'an', 'food', 'dishes', 'dish', 'items', 'item', 'section', 'category', 'menu', 'pls', 'all'];
@@ -69,6 +65,70 @@ const referencesADish = (raw: string) =>
     tokenize(raw).some(token => DISTINCTIVE_TOKENS.has(token) && !RESERVED_VOCABULARY.has(token));
 
 export const ChatService = {
+    /**
+     * Places the order with the server, which prices it from its own copy of the menu and
+     * re-checks every rule before the kitchen is told anything.
+     *
+     * The server returns the order it will actually cook, which can differ from the one sent: a
+     * dish code we do not sell is dropped and a tampered price is replaced. The caller adopts that
+     * order so the guest's basket, receipt and kitchen ticket all agree.
+     */
+    placeOrder: async (order: Order): Promise<{ placed: boolean; order?: Order; reason?: string }> => {
+        try {
+            const reply = await fetch('/api/place-order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ order }),
+            });
+            const payload: unknown = await reply.json().catch(() => null);
+            const result = (typeof payload === 'object' && payload !== null ? payload : {}) as {
+                order?: unknown; error?: unknown; detail?: unknown;
+            };
+
+            const canonical = result.order;
+            if (reply.ok && canonical && typeof canonical === 'object') {
+                return { placed: true, order: canonical as Order };
+            }
+            return {
+                placed: false,
+                reason: typeof result.detail === 'string'
+                    ? result.detail
+                    : typeof result.error === 'string' ? result.error : `http_${reply.status}`,
+            };
+        } catch {
+            return { placed: false, reason: 'unreachable' };
+        }
+    },
+
+
+    /**
+     * Asks the conversational waiter for a reply.
+     *
+     * A plain fetch rather than a direct call into lib/engine: the engine holds the Gemini SDK
+     * and the API key, and importing it here would pass `apiKey: undefined` to the browser.
+     *
+     * The body is read even on a non-2xx status, because the engine reports rate limits and
+     * upstream failures as a normal reply carrying `meta.error` plus user-facing copy. Throwing
+     * those away would replace a real message from the waiter with a generic toast.
+     */
+
+  askWaiter: async (history: ChatMessage[], order: Order | null): Promise<AIResponse> => {
+    const reply = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: history, order }),
+    });
+
+    const payload: unknown = await reply.json().catch(() => null);
+
+    if (typeof payload !== 'object' || payload === null || typeof (payload as AIResponse).text !== 'string') {
+      // No usable body: a proxy error page, an offline failure, or a rejected request.
+      throw new Error(`Waiter unavailable (${reply.status})`);
+    }
+
+    return payload as AIResponse;
+  },
+
   /**
    * Returns a canned reply only when confident, otherwise `null` so the message goes to Gemini.
    */
@@ -85,20 +145,19 @@ export const ChatService = {
     //    'i want' is deliberately absent: "I want to check out" must still reach checkout.
     if (hasWord(...ORDER_WORDS) || has(...ORDER_PHRASES)) return null;
 
-    // 0b. The customer named a real dish or quoted a real item code. This is the reliable
-    //     signal the old keyword lists never had: "fish and chips please" is an order even
-    //     though it contains the subcategory name "fish".
+    // 0b. The customer named a dish we sell or quoted an item code. "Fish and chips please" is an
+    //     order even though it contains the subcategory name "fish".
     if (referencesADish(raw) || mentionsItemCode(raw)) return null;
 
     // A. Navigation to the basket
     if (has(...CHECKOUT_STRONG)) {
-      return { text: "Opening your shopping bag summary. 🛒", orderAction: { action: 'checkout' } };
+      return { text: "Here is your basket summary.", orderAction: { action: 'checkout' } };
     }
 
     // B. Contact / location details
     if (has(...CONTACT_STRONG) || (has(...CONTACT_WEAK) && has(...CONTACT_CORROBORATOR))) {
       const r = RESTAURANT_DATA.restaurant;
-      return { text: `📍 **${r.name}**\n${r.contact.address}\n\n📞 **Phone:** ${r.contact.phone}` };
+      return { text: `**${r.name}**\n${r.contact.address}\n\n**Phone:** ${r.contact.phone}` };
     }
 
     // C. Opening hours — STRONG tokens, or WEAK ones corroborated / in a short question
@@ -110,26 +169,44 @@ export const ChatService = {
       const h = isWinter ? RESTAURANT_DATA.restaurant.hours.season_oct_feb : RESTAURANT_DATA.restaurant.hours.season_mar_sep;
       const openDays = RESTAURANT_DATA.restaurant.hours.open_days;
       return {
-        text: `🕰️ **Opening Hours**\n\n**Lunch:** ${h.lunch}\n**Dinner:** ${h.dinner}\n\n${openDays.length >= 7 ? 'We are open every day!' : `Open ${openDays.join(', ')}.`}`
+        text: `**Opening Hours**\n\n**Lunch:** ${h.lunch}\n**Dinner:** ${h.dinner}\n\n${openDays.length >= 7 ? 'We are open every day!' : `Open ${openDays.join(', ')}.`}`
       };
     }
 
-    // D. Menu navigation. A section name only counts when the message asks to see it, or *is*
-    //    that name — the old `raw.length < 25` heuristic turned any short sentence naming a
-    //    section ("fish and chips please") into a menu jump.
+    // D. Menu navigation. A section name counts only when the message asks to see it or is that
+    //    name, so "fish and chips please" does not become a menu jump.
+
     const wantsNavigation = has(...NAVIGATION_VERBS);
-    const mentions = (name: string) => normalizedText.includes(` ${name.toLowerCase()} `);
-    const isOnlyName = (name: string) =>
-      normalizedText
-        .replace(new RegExp(`\\b(${EQUIVALENCE_FILLER.join('|')})\\b`, 'g'), ' ')
-        .replace(/\s+/g, ' ')
-        .trim() === name.toLowerCase();
+
+    /**
+     * Section names are matched on word boundaries, and a guest pluralises them: "soups" for
+     * "Soup", "appetizers" for "Appetizer & Starter". A trailing "es" is dropped too, which is
+     * the ordinary plural of a word already ending in "r".
+     */
+    const singularise = (word: string) => word.replace(/e?s$/, '');
+    const mentions = (name: string) => {
+        const target = name.toLowerCase();
+        if (normalizedText.includes(` ${target} `)) return true;
+        // "soup" should match "soups", so compare the guest's words in singular form too.
+        return wordsOf(normalizedText).some(word => singularise(word) === singularise(target));
+    };
+    const isOnlyName = (name: string) => {
+        const target = name.toLowerCase();
+        const stripped = normalizedText
+            .replace(new RegExp(`\\b(${EQUIVALENCE_FILLER.join('|')})\\b`, 'g'), ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (stripped === target) return true;
+        // Everything the guest said reduces to this one section name, plurals aside.
+        const guest = wordsOf(stripped);
+        return guest.length > 0 && guest.every(word => singularise(word) === singularise(target));
+    };
 
     for (const category of RESTAURANT_DATA.menu.categories) {
       // Match on the id too: people type "beverages" far more often than "Beverage & Desserts".
       const label = [category.name, category.id].find(name => mentions(name) || isOnlyName(name));
       if (label && (wantsNavigation || isOnlyName(label))) {
-        return { text: `Opening the **${category.name}** collection. 📖`, orderAction: { action: 'browse_menu', category_id: category.id } };
+        return { text: `Here is the **${category.name}** collection for you.`, orderAction: { action: 'browse_menu', category_id: category.id } };
       }
     }
 
@@ -137,14 +214,14 @@ export const ChatService = {
       for (const sub of subcategoriesOf(category)) {
         const label = [sub.name, sub.id].find(name => mentions(name) || isOnlyName(name));
         if (label && (wantsNavigation || isOnlyName(label))) {
-          return { text: `Opening the **${sub.name}** section for you. 📖`, orderAction: { action: 'browse_menu', category_id: category.id, subcategory_id: sub.id } };
+          return { text: `Here is the **${sub.name}** section for you.`, orderAction: { action: 'browse_menu', category_id: category.id, subcategory_id: sub.id } };
         }
       }
     }
 
     // E. "show me the menu" with no section named.
     if (raw === 'menu' || raw === 'full menu' || (has('menu') && wantsNavigation)) {
-      return { text: "Opening the full menu for you! 📖", orderAction: { action: 'browse_menu' } };
+      return { text: "Here is our full menu.", orderAction: { action: 'browse_menu' } };
     }
 
     return null;

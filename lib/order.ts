@@ -22,13 +22,9 @@ import type {
     DeliveryType,
     Order,
     OrderTotals,
+    OrderValidationCode,
     OrderValidationIssue,
     OrderValidationResult,
-    PaymentDetails,
-    PaymentMethod,
-    PaymentValidationCode,
-    PaymentValidationIssue,
-    PaymentValidationResult,
 } from './types';
 
 /**
@@ -46,10 +42,8 @@ export function isValidBdPhone(raw: string | undefined | null): boolean {
     return BD_PHONE_REGEX.test(normalizeBdPhone(raw));
 }
 
-/**
- * A line total is always derived from quantity × price rather than read from
- * `CartItem.total`, because that value travels through the client and can be tampered with.
- */
+/** Derived from price x quantity, never read from `CartItem.total`, which travels via the client. */
+
 export function lineTotalOf(price: number, quantity: number): number {
     const safePrice = Number.isFinite(price) && price > 0 ? price : 0;
     const safeQuantity = Number.isFinite(quantity) ? quantity : 0;
@@ -65,10 +59,7 @@ export interface TotalsOptions {
     distanceKm?: number;
 }
 
-/**
- * Order arithmetic. Kept intentionally cheap and side-effect free so it can run inside a
- * `useMemo` on every render without measurable cost.
- */
+/** Cheap and side-effect free, so it is safe to call inside a `useMemo` on every render. */
 export function calculateTotals(items: CartItem[] | null | undefined, options: TotalsOptions = {}): OrderTotals {
     const list = items ?? [];
     const { deliveryType = 'pickup', distanceKm } = options;
@@ -99,12 +90,21 @@ export interface DraftOrderInput {
     status?: Order['status'];
 }
 
-/**
- * Builds a fully-formed Order. Always returns every required field, so no caller ever has
- * to spread a possibly-null order (`{...null}` silently produced orders with no total).
- */
+/** Builds a fully-formed Order. Never spread a possibly-null order: `{...null}` loses the total. */
 export function createDraftOrder(input: DraftOrderInput = {}): Order {
-    const items = input.items ?? [];
+    /*
+     * Re-derive every line total from price x quantity before anything reads it, so the figure
+     * shown against a dish cannot disagree with the subtotal printed beside it.
+     *
+     * Only the total is touched. A fractional or negative quantity is left alone: `validateOrder`
+     * treats that as a failure rather than something to quietly fix, and coercing it here would
+     * hide the bad input from the check meant to catch it.
+     */
+    const items = (input.items ?? []).map(item => ({
+        ...item,
+        total: lineTotalOf(item.price, item.quantity),
+    }));
+
     const customerInfo = input.customerInfo;
     const totals = calculateTotals(items, {
         deliveryType: customerInfo?.deliveryType,
@@ -124,12 +124,43 @@ export function createDraftOrder(input: DraftOrderInput = {}): Order {
     };
 }
 
+/** The receipt body. One function so the chat and card paths cannot print different totals. */
+export function orderConfirmedMessage(order: Order): string {
+    return `Order Confirmed! ID: **${order.id}**. Total: ৳${order.total}`;
+}
+
+/** Blockers whose fix is "add more food", which is a thread action rather than a form's. */
+const NEEDS_MORE_DISHES = new Set<OrderValidationCode>(['empty_cart', 'invalid_items', 'below_minimum_order']);
+
 /**
- * Draft → confirmed. Re-derives the totals from the line items (never trusts the stored
- * subtotal) and guarantees the order carries an id, since the receipt shows it to the
- * customer and to the kitchen.
+ * True when the thread has what it needs and the order still cannot be placed, so the checkout
+ * card should open.
+ *
+ * The gate is the three answers that make a card the natural next step: who the guest is, how to
+ * reach them, and how they want it. Until those are known the thread keeps asking, because a
+ * question is less work than a form. Everything after that is the card's job.
  */
-export function finalizeOrder(order: Order, status: Order['status'] = 'confirmed', payment?: PaymentOutcome): Order {
+export function needsCheckoutCard(order: Order | null): boolean {
+    if (!order) return false;
+
+    const info = order.customerInfo;
+    const essentialsKnown = order.items.length > 0
+        && Boolean(info?.name?.trim())
+        && Boolean(info?.phone?.trim())
+        && (info?.deliveryType === 'delivery' || info?.deliveryType === 'pickup');
+    if (!essentialsKnown) return false;
+
+    const codes = validateOrder(order).issues.map(issue => issue.code);
+    // Nothing outstanding means the thread can confirm on its own.
+    if (codes.length === 0) return false;
+    return !codes.some(code => NEEDS_MORE_DISHES.has(code));
+}
+
+/**
+ * Marks the order as placed. Cash on delivery is the only method, so it is set here rather than
+ * accepted from a caller, and `paymentStatus` stays `pending` until the rider has the cash.
+ */
+export function finalizeOrder(order: Order, status: Order['status'] = 'confirmed'): Order {
     return {
         ...createDraftOrder({
             items: order.items,
@@ -138,9 +169,8 @@ export function finalizeOrder(order: Order, status: Order['status'] = 'confirmed
             createdAt: order.createdAt,
             status,
         }),
-        paymentStatus: payment?.status ?? 'pending',
-        ...(payment ? { paymentMethod: payment.method } : {}),
-        ...(payment?.reference ? { paymentReference: payment.reference } : {}),
+        paymentMethod: 'cod',
+        paymentStatus: 'pending',
     };
 }
 
@@ -188,17 +218,24 @@ export function validateOrder(order: Order | null | undefined): OrderValidationR
         problems.push(issue('invalid_phone', 'Please provide a valid 11-digit BD mobile number (e.g. 01712345678).'));
     }
 
+    // Delivery or pickup has to be an actual answer. `calculateTotals` falls back to pickup when
+    // the field is absent, so without this an order the guest never discussed collections for
+    // would quietly become a collection.
+    if (info?.deliveryType !== 'delivery' && info?.deliveryType !== 'pickup') {
+        problems.push(issue('missing_delivery_type', 'Would you like this delivered, or collected Sir/Ma\'am?'));
+    }
+
     if (info?.deliveryType === 'delivery') {
         if (!info.address?.trim()) {
             problems.push(issue('missing_address', 'Delivery address required.'));
         }
 
-        // Strict here (unlike OrderTotals.isDistanceValid): an unknown distance is NOT a
-        // pass. locationVerified is only ever set by the map, so this cannot be asserted
-        // by the model.
-        if (info.locationVerified !== true || typeof info.distance !== 'number' || !Number.isFinite(info.distance)) {
-            problems.push(issue('location_unverified', 'Please pin location on map'));
-        } else if (info.distance > MAX_DELIVERY_RANGE) {
+        /*
+         * The typed address is what the rider follows, so it is the only requirement. The map is
+         * an extra: a pin gives us a real distance to check against the radius, and an unpinned
+         * order is not blocked for lacking one. Only the map can set a distance.
+         */
+        if (typeof info.distance === 'number' && Number.isFinite(info.distance) && info.distance > MAX_DELIVERY_RANGE) {
             problems.push(issue('outside_delivery_zone', `Outside delivery zone (${MAX_DELIVERY_RANGE}km)`));
         }
 
@@ -218,110 +255,4 @@ export function firstIssue(result: OrderValidationResult): OrderValidationIssue 
     return result.valid ? undefined : result.issues[0];
 }
 
-// ---------------------------------------------------------------------------
-// Payment (simulated)
-// ---------------------------------------------------------------------------
 
-/**
- * Luhn checksum — the same check every card scheme uses. Implementing it properly (rather
- * than "16 digits and done") is what makes the mock behave like the real thing, and it gives
- * us a genuinely correct validation rule to test.
- */
-export function luhnCheck(rawNumber: string): boolean {
-    const digits = rawNumber.replace(/\D/g, '');
-    if (digits.length < 12) return false;
-
-    let sum = 0;
-    let double = false;
-    for (let i = digits.length - 1; i >= 0; i--) {
-        let value = digits.charCodeAt(i) - 48;
-        if (double) {
-            value *= 2;
-            if (value > 9) value -= 9;
-        }
-        sum += value;
-        double = !double;
-    }
-    return sum % 10 === 0;
-}
-
-export function maskCardNumber(rawNumber: string): string {
-    const digits = rawNumber.replace(/\D/g, '');
-    if (digits.length < 4) return digits;
-    return `•••• •••• •••• ${digits.slice(-4)}`;
-}
-
-/** MM/YY, and not in the past. `now` is injectable so this is testable. */
-function isValidExpiry(rawExpiry: string, now: Date): boolean {
-    const match = rawExpiry.trim().match(/^(\d{2})\s*\/\s*(\d{2})$/);
-    if (!match) return false;
-
-    const month = Number(match[1]);
-    const year = 2000 + Number(match[2]);
-    if (month < 1 || month > 12) return false;
-
-    // Valid through the last instant of the stated month.
-    const expiresAt = new Date(year, month, 1);
-    return expiresAt > now;
-}
-
-function paymentIssue(code: PaymentValidationCode, message: string): PaymentValidationIssue {
-    return { code, message };
-}
-
-/**
- * Validates the payment fields for the chosen method. Cash on Delivery has nothing to check.
- * The rules mirror what a real PSP would enforce, so swapping in a live gateway later only
- * means replacing the authorisation call, not the validation.
- */
-export function validatePaymentDetails(
-    method: PaymentMethod,
-    details: PaymentDetails,
-    now: Date = new Date()
-): PaymentValidationResult {
-    if (method === 'cod') return { valid: true, issues: [] };
-
-    const problems: PaymentValidationIssue[] = [];
-
-    if (method === 'card') {
-        const cardNumber = details.cardNumber ?? '';
-        if (!luhnCheck(cardNumber)) {
-            problems.push(paymentIssue('card_number_invalid', 'That card number does not look valid. Please check and try again.'));
-        }
-        if (!isValidExpiry(details.expiry ?? '', now)) {
-            problems.push(paymentIssue('card_expiry_invalid', 'Please enter a valid future expiry date as MM/YY.'));
-        }
-        const cvc = (details.cvc ?? '').replace(/\D/g, '');
-        if (!/^\d{3,4}$/.test(cvc)) {
-            problems.push(paymentIssue('card_cvc_invalid', 'The security code should be 3 or 4 digits.'));
-        }
-    }
-
-    if (method === 'mobile_banking') {
-        if (!isValidBdPhone(details.walletNumber)) {
-            problems.push(paymentIssue('wallet_number_invalid', 'Please enter the 11-digit mobile number linked to your wallet.'));
-        }
-    }
-
-    const [first, ...rest] = problems;
-    if (!first) return { valid: true, issues: [] };
-    return { valid: false, issues: [first, ...rest] };
-}
-
-export interface PaymentOutcome {
-    method: PaymentMethod;
-    status: Order['paymentStatus'];
-    /** Only card/mobile produce a reference; COD is collected later. */
-    reference?: string;
-}
-
-/**
- * A fake authorisation code. Deliberately not a real-looking PSP token — the prefix says
- * what it is, so a screenshot of the receipt cannot be mistaken for a live transaction.
- */
-export function simulateAuthorization(method: PaymentMethod): PaymentOutcome {
-    if (method === 'cod') return { method, status: 'pending' };
-
-    const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
-    return { method, status: 'paid', reference: `SIM-${suffix}` };
-}

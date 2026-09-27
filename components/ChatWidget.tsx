@@ -1,33 +1,24 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
-import { Bot, Menu, ShoppingBag, Send, MessageSquare, X, Mic, MicOff, Clock as ClockIcon, Phone, Utensils, TriangleAlert, Sparkles, Plus, ChevronLeft, ChevronRight } from 'lucide-react';
-import dynamic from 'next/dynamic';
+import { Bot, ShoppingBag, Send, MessageSquare, X, Mic, MicOff, Clock as ClockIcon, Phone, Utensils, TriangleAlert, Sparkles, Plus, ChevronLeft, ChevronRight, RotateCcw, Bike, Store, Check } from 'lucide-react';
 import { StorageService } from '@/lib/storageService';
 import { RESTAURANT_DATA } from '@/lib/constants';
-import { ChatMessage as ChatMessageType, Order, OrderAction } from '@/lib/types';
-import { createDraftOrder, finalizeOrder, lineTotalOf } from '@/lib/order';
+import { ChatMessage as ChatMessageType, CustomerInfo, Order, OrderAction } from '@/lib/types';
+import { createDraftOrder, finalizeOrder, firstIssue, lineTotalOf, needsCheckoutCard, orderConfirmedMessage, validateOrder } from '@/lib/order';
 import { findMenuItemByCode } from '@/lib/menuIndex';
 import { suggestForCart } from '@/lib/recommend';
 import { useCart } from '@/lib/hooks/useCart';
 import { useChat } from '@/lib/hooks/useChat';
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap';
 import { ChatMessage } from '@/components/ChatMessage';
+import { BasketCard, CheckoutCard, MenuPickerCard, PlaceOrderCard } from '@/components/chat/OrderCards';
 import { ToastContainer, showToast } from '@/components/ToastContainer';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Field, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
-import { getLogicResponse } from '@/lib/engine';
 import { ChatService } from '@/lib/chatService';
-import { OPEN_WIDGET_EVENT, type WidgetTab } from '@/lib/widgetBus';
-
-// Dynamically import heavy components
-const OrderWizard = dynamic(() => import('@/components/OrderWizard').then(mod => mod.OrderWizard), {
-    ssr: false,
-    loading: () => <div className="flex-1 flex items-center justify-center bg-slate-50"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div></div>
-});
+import { OPEN_WIDGET_EVENT, type OpenWidgetDetail } from '@/lib/widgetBus';
 
 // The toast surface is no longer lazy — shadcn's Toaster is a thin provider and firing a
 // toast no longer re-renders this component.
@@ -37,6 +28,49 @@ const PREDEFINED_QUESTIONS = [
     { label: 'Contact Info', text: 'What is your address and phone number?', icon: <Phone size={12} /> },
     { label: 'Menu', text: 'Show me the full menu', icon: <Utensils size={12} /> },
 ];
+
+/**
+ * Chips that depend on where the guest actually is, so the fastest way forward is always one tap.
+ *
+ * The static questions above are fine as a floor, but a guest who has just been asked "delivery or
+ * pickup?" should not have to type the answer when the answer is a button. Each branch below
+ * answers the one question the order is actually blocked on, in the order the waiter asks it.
+ */
+function contextualReplies(order: Order | null, messages: ChatMessageType[]): typeof PREDEFINED_QUESTIONS {
+    const hasItems = (order?.items.length ?? 0) > 0;
+    const info = order?.customerInfo;
+    const askedSomething = [...messages].reverse().some(
+        message => message.sender === 'ai' && message.content.trim().endsWith('?'),
+    );
+
+    // An empty basket is the hard stop: nothing else can be offered until there is food in it.
+    if (!hasItems) {
+        return [{ label: 'Show me the menu', text: 'Show me the full menu', icon: <Utensils size={12} /> }];
+    }
+
+    const undecided = info?.deliveryType !== 'delivery' && info?.deliveryType !== 'pickup';
+    if (undecided) {
+        return [
+            { label: 'Delivery', text: 'Delivery please', icon: <Bike size={12} /> },
+            { label: 'Pickup', text: 'I will collect it', icon: <Store size={12} /> },
+        ];
+    }
+
+    if (order && validateOrder(order).valid) {
+        return [{ label: 'Place my order', text: 'Place my order', icon: <Check size={12} /> }];
+    }
+
+    // A delivery that still needs an address: the checkout card is already opening for this, so
+    // offer the information questions rather than pretending the order can be placed.
+    if (info?.deliveryType === 'delivery' && !info.address?.trim()) {
+        return [{ label: 'Delivery info', text: 'What is the delivery charge and area?', icon: <Bike size={12} /> }];
+    }
+
+    // Otherwise the guest is mid-flow with nothing to decide: only suggest questions once the
+    // waiter has actually asked one, so the row is not a permanent strip of noise.
+    return askedSomething ? [] : PREDEFINED_QUESTIONS;
+}
+
 
 /** The verbs that operate on basket lines, and how to report them to the customer. */
 const ITEM_VERBS = new Set<OrderAction['action']>(['add', 'remove', 'set_quantity', 'set_notes']);
@@ -75,18 +109,38 @@ interface ChatWidgetProps {
 
 export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiConfigured = true }: ChatWidgetProps) => {
     const [isOpen, setIsOpen] = useState(initiallyOpen);
-    const [activeTab, setActiveTab] = useState<'chat' | 'menu' | 'cart'>('chat');
     const [input, setInput] = useState('');
+    const composerRef = useRef<HTMLInputElement>(null);
     // Starts pessimistic only when we know the key is missing; otherwise a single failed
     // call flips it and a later success flips it back.
     const [aiDegraded, setAiDegraded] = useState(!aiConfigured);
+    /** The last message that failed, so the guest can resend it instead of retyping it. */
+    const [retryableText, setRetryableText] = useState<string | null>(null);
+    /** First tap of "start over" arms it; the second commits and this resets. */
+    const [clearArmed, setClearArmed] = useState(false);
 
-    // Menu Category Context
-    const [targetCategory, setTargetCategory] = useState<string>();
-    const [targetSubCategory, setTargetSubCategory] = useState<string>();
+    /**
+     * The conversation is the only surface; these stages are the two things chat cannot do —
+     * read a 230-item catalogue legibly, and pin a location. The card is transient UI pinned to
+     * the end of the thread rather than a stored message, so it can never come back stale.
+     */
+    const [stage, setStage] = useState<'none' | 'menu' | 'basket' | 'checkout' | 'payment'>('none');
+    const [focusCategoryId, setFocusCategoryId] = useState<string | undefined>();
+    const [focusSubcategoryId, setFocusSubcategoryId] = useState<string | undefined>();
+    const [placingOrder, setPlacingOrder] = useState(false);
 
     const { currentOrder, setCurrentOrder, totalItems, resetCart, updateOrder } = useCart(null);
     const { messages, isLoading, setIsLoading, addMessage, setFullHistory, setMessages } = useChat([]);
+
+    /** Item code -> quantity, so every card can show what is already in the basket. */
+    const cartCounts = useMemo(() => {
+        const counts = new Map<string, number>();
+        for (const line of currentOrder?.items ?? []) counts.set(line.code, line.quantity);
+        return counts;
+    }, [currentOrder]);
+
+    const closeCard = useCallback(() => setStage('none'), []);
+
 
     /**
      * Cart-aware suggestions, computed locally on every basket change. Zero API calls, instant,
@@ -98,12 +152,20 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
     const [lastOrder, setLastOrder] = useState<Order | null>(null);
 
     const quickReplies = useMemo(() => {
-        const base = [...PREDEFINED_QUESTIONS];
+        // Contextual first, then the evergreen questions, de-duplicated by what they would send.
+        // A returning guest's "same as last time" outranks both, because for them it is the
+        // shortest path to a full basket.
+        const base = [...contextualReplies(currentOrder, messages)];
         if (lastOrder) {
             base.unshift({ label: 'Same as last time', text: 'same as last time', icon: <Sparkles size={12} /> });
         }
+        for (const fallback of PREDEFINED_QUESTIONS) {
+            if (base.length >= 4) break;
+            if (base.some(reply => reply.text === fallback.text)) continue;
+            base.push(fallback);
+        }
         return base;
-    }, [lastOrder]);
+    }, [currentOrder, messages, lastOrder]);
 
     const [isListening, setIsListening] = useState(false);
     // The Web Speech API is still Chromium-only, so it is feature-detected and the mic is
@@ -136,17 +198,28 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
         return () => query.removeEventListener('change', sync);
     }, []);
 
-    // Lets the landing page's "Open the live menu" button drive the widget, without either
-    // component having to become a client component or share lifted state.
+    // Lets a page button drive the widget, without either component having to become a client
+    // component or share lifted state. The tab argument survives as the card it now opens, so a
+    // call to 'menu' still lands the guest on the menu rather than on an empty conversation. A
+    // `prefill` is dropped into the composer and focused, never sent: the guest must still choose
+    // to send it, and it must be visible so they can see what they are about to order.
     useEffect(() => {
         const onRequestOpen = (event: Event) => {
-            const tab = (event as CustomEvent<WidgetTab>).detail;
+            const { tab, prefill } = (event as CustomEvent<OpenWidgetDetail>).detail ?? { tab: 'chat' as const };
             setIsOpen(true);
-            if (tab === 'chat' || tab === 'menu' || tab === 'cart') setActiveTab(tab);
+            if (prefill) {
+                setInput(prefill);
+                // The composer is mounted once the panel is open; focus it so the guest can send
+                // straight away. rAF because the panel animates in and the node is not laid out
+                // in the same tick as the state change.
+                requestAnimationFrame(() => composerRef.current?.focus());
+            }
+            if (tab === 'menu') setStage('menu');
+            else if (tab === 'cart') setStage(totalItems > 0 ? 'basket' : 'none');
         };
         window.addEventListener(OPEN_WIDGET_EVENT, onRequestOpen);
         return () => window.removeEventListener(OPEN_WIDGET_EVENT, onRequestOpen);
-    }, []);
+    }, [totalItems]);
 
     // Voice Input Setup
     useEffect(() => {
@@ -206,16 +279,60 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
     // `showToast` is now a module-level helper over shadcn's global toast manager, so it is
     // stable across renders and no longer a dependency of the callbacks below.
 
+    /**
+     * The single point where an order becomes real. Both routes in — the guest saying "place my
+     * order" in the thread, and the confirm card — finish here.
+     *
+     * Server-authoritative: the order is posted to /api/place-order, which prices it from its own
+     * menu and re-checks every rule, and the guest is confirmed against the order the server will
+     * cook. If that call fails the basket is left intact, because confirming an order the kitchen
+     * never heard about is the one failure this app cannot have.
+     */
+    const handleOrderComplete = useCallback(async (order: Order) => {
+        setPlacingOrder(true);
+        const result = await ChatService.placeOrder(order);
+        setPlacingOrder(false);
+
+        if (!result.placed || !result.order) {
+            addMessage({
+                id: Date.now().toString(),
+                content: `I could not place that order${result.reason ? ` (${result.reason})` : ''}. Your basket is exactly as you left it — please try again in a moment.`,
+                sender: 'ai',
+                timestamp: new Date(),
+                type: 'text',
+            });
+            showToast('Order not placed', 'error');
+            return;
+        }
+
+        const placed = result.order;
+        addMessage({
+            id: Date.now().toString(),
+            content: orderConfirmedMessage(placed),
+            sender: 'ai',
+            timestamp: new Date(),
+            type: 'order_update',
+            metadata: { orderId: placed.id },
+        });
+        StorageService.saveCompletedOrder(placed);
+        setLastOrder(placed);
+        resetCart();
+        setStage('none');
+    }, [addMessage, resetCart]);
+
     const processOrderAction = useCallback(async (action: OrderAction) => {
         if (action.action === 'browse_menu') {
-            setTargetCategory(action.category_id);
-            setTargetSubCategory(action.subcategory_id);
-            setActiveTab('menu');
+            // Both ids matter. A guest who asks for "soups" means the Soup subcategory, and
+            // forwarding only the category used to open the card on the whole of Chinese —
+            // salads and satay under a promise of soup.
+            setFocusCategoryId(action.category_id);
+            setFocusSubcategoryId(action.subcategory_id);
+            setStage('menu');
             return;
         }
 
         if (action.action === 'checkout') {
-            setActiveTab('cart');
+            setStage(totalItems > 0 ? 'checkout' : 'basket');
             return;
         }
 
@@ -354,14 +471,14 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
             // Security: the model may capture the customer's details, but it may NOT assert
             // that a location was verified. `locationVerified` is only ever set by the map,
             // otherwise "add my address" alone would satisfy the 5km delivery check.
-            updateOrder(createDraftOrder({
+            const next = createDraftOrder({
                 items: currentOrder?.items ?? [],
                 customerInfo: {
                     ...previous,
                     name: action.customer_details.name || previous?.name || '',
                     phone: action.customer_details.phone || previous?.phone || '',
                     address: action.customer_details.address || previous?.address || '',
-                    deliveryType: action.customer_details.delivery_type ?? previous?.deliveryType ?? 'pickup',
+                    deliveryType: action.customer_details.delivery_type ?? previous?.deliveryType,
                     preferredTime: action.customer_details.preferred_time || previous?.preferredTime || '',
                     // Remembered facts accumulate rather than replace, so the waiter does not
                     // "forget" an allergy the moment the guest mentions their name.
@@ -370,27 +487,28 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
                 },
                 id: currentOrder?.id,
                 createdAt: currentOrder?.createdAt
-            }));
+            });
+            updateOrder(next);
+
+            /*
+              Hand over to the card once the thread has nothing left to ask. This is the fix for
+              a dead end: a guest who gave their name, number and "delivery" was told "details
+              saved" and then nothing happened, because `confirm` is correctly refused without a
+              map pin and the thread never showed the map. Judged on the *next* order rather than
+              `currentOrder`, which is still the previous one at this point in the render.
+            */
+            if (needsCheckoutCard(next)) setStage('checkout');
         }
 
         if (action.action === 'confirm') {
             if (currentOrder && currentOrder.items.length > 0) {
-                // finalizeOrder re-derives the totals and guarantees an order id.
-                const finishedOrder = finalizeOrder(currentOrder);
-                addMessage({
-                    id: Date.now().toString(),
-                    content: `Order Success! Your Order ID is **${finishedOrder.id}**. Total: ৳${finishedOrder.total}`,
-                    sender: 'ai',
-                    timestamp: new Date(),
-                    type: 'order_update',
-                    metadata: { orderId: finishedOrder.id }
-                });
-                resetCart();
-                setActiveTab('chat');
+                // The engine already gates `confirm` on validateOrder, so by the time this
+                // runs the order is one the server would have accepted.
+                handleOrderComplete(finalizeOrder(currentOrder));
                 showToast("Order placed successfully!", 'success');
             }
         }
-    }, [currentOrder, updateOrder, addMessage, resetCart]);
+    }, [currentOrder, updateOrder, totalItems, handleOrderComplete]);
 
     const handleSend = async (text: string) => {
         if (!text.trim() || isLoading) return;
@@ -455,7 +573,14 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
                 return;
             }
 
-            const response = await getLogicResponse([...messages, userMsg], currentOrder);
+            /*
+              Goes through the server route, never the engine directly. The engine holds the
+              Gemini SDK and reads GEMINI_API_KEY, and only NEXT_PUBLIC_* vars reach a client
+              bundle — so calling it from here resolved the key to undefined, every request
+              threw, and the widget quietly fell back to the local intent layer, which can open
+              the menu but cannot add a dish. The route is also what keeps the key private.
+            */
+            const response = await ChatService.askWaiter([...messages, userMsg], currentOrder);
             addMessage({
                 id: (Date.now() + 1).toString(),
                 content: response.text,
@@ -471,32 +596,142 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
             } else if (response.meta?.source === 'model') {
                 setAiDegraded(false);
             }
+            // Only a genuine failure arms the retry; a successful turn clears it, so the button can
+            // never appear next to a reply that already landed.
+            setRetryableText(response.meta?.error ? text : null);
         } catch (err) {
             console.error(err);
             setAiDegraded(true);
+            setRetryableText(text);
             showToast("Connection issue", "error");
         } finally {
             setIsLoading(false);
         }
     };
 
-    // UI callback for a completed checkout (the domain transition lives in lib/order.ts).
-    const handleOrderComplete = useCallback((order: Order) => {
-        addMessage({
-            id: Date.now().toString(),
-            content: `Order Confirmed! ID: **${order.id}**`,
+    /**
+     * Re-sends the last message that failed. A guest whose "place my order" came back as an
+     * apology would otherwise have to retype it, with the basket that made it meaningful still on
+     * screen but no longer in mind.
+     *
+     * Not memoised: it closes over `handleSend`, which reads live order state, and wrapping
+     * either in `useCallback` means restating a dependency list where a stale entry would quietly
+     * resend the wrong thing.
+     */
+    const retryLastMessage = () => {
+        if (retryableText) handleSend(retryableText);
+    };
+
+
+    /**
+     * Starting over. Two taps by design: the first arms the button and the second commits, and the
+     * arming lapses after a few seconds so a stray click cannot sit primed indefinitely.
+     *
+     * It clears the conversation, the basket, the draft and the armed state, and puts the opening
+     * greeting back — the same thing a first-time visitor sees, which is the point of the gesture.
+     */
+    const handleClearConversation = useCallback(() => {
+        if (!clearArmed) {
+            setClearArmed(true);
+            showToast('Tap the button again to clear this conversation', 'info');
+            return;
+        }
+
+        setMessages([{
+            id: 'welcome',
+            content: `Assalamu Alaikum! Welcome to **${RESTAURANT_DATA.restaurant.name}**.\n\nI am **SeasonBot**, your personal waiter. How may I assist you with your dining experience?`,
             sender: 'ai',
             timestamp: new Date(),
-            type: 'order_update',
-            metadata: { orderId: order.id }
-        });
-        // Remembered so "same as last time" works on the next visit. There is no backend in
-        // this project — see README "Known Limitations".
-        StorageService.saveCompletedOrder(order);
-        setLastOrder(order);
+            type: 'text',
+        }]);
+        // resetCart, not updateOrder(null): it also clears the persisted draft, so a reload after
+        // starting over does not resurrect the basket that was just discarded.
         resetCart();
-        setActiveTab('chat');
-    }, [addMessage, resetCart]);
+        setStage('none');
+        setInput('');
+        setRetryableText(null);
+        setClearArmed(false);
+        setLastOrder(null);
+        showToast('New conversation started', 'success');
+    }, [clearArmed, setMessages, resetCart]);
+
+    /*
+
+
+    /** Basket edits from the card steppers. Zero removes the line, matching the chat verbs. */
+    const changeQuantity = useCallback((code: string, next: number) => {
+        const items = (currentOrder?.items ?? [])
+            .map(line => {
+                if (line.code !== code) return line;
+                const quantity = Math.max(0, Math.trunc(next));
+                return { ...line, quantity, total: lineTotalOf(line.price, quantity) };
+            })
+            .filter(line => line.quantity > 0);
+
+        updateOrder(createDraftOrder({
+            items,
+            customerInfo: currentOrder?.customerInfo,
+            id: currentOrder?.id,
+            createdAt: currentOrder?.createdAt,
+        }));
+
+        // Removing the last line would otherwise leave an open basket card reading "0 items"
+        // with a live "Continue to checkout" that can only fail. Back to the thread instead.
+        if (items.length === 0) setStage(stage === 'basket' ? 'none' : stage);
+    }, [currentOrder, updateOrder, stage]);
+
+    const patchCustomerInfo = useCallback((next: CustomerInfo) => {
+        updateOrder(createDraftOrder({
+            items: currentOrder?.items ?? [],
+            customerInfo: next,
+            id: currentOrder?.id,
+            createdAt: currentOrder?.createdAt,
+        }));
+    }, [currentOrder, updateOrder]);
+
+    /**
+     * The map is the only thing that may mark a location verified — the model is barred from
+     * doing so, which is what stops a guest being told their address is serviceable when the
+     * kitchen cannot deliver there. See the note in the checkout card.
+     */
+    const handleLocationSelect = useCallback((
+        lat: number, lng: number, distance: number, verified: boolean, suggestedAddress?: string
+    ) => {
+        const previous = currentOrder?.customerInfo as CustomerInfo | undefined;
+        const shouldAdoptAddress = Boolean(suggestedAddress)
+            && (!previous?.address || previous.address === previous.addressSuggestion);
+
+        patchCustomerInfo({
+            ...(previous ?? { name: '', phone: '', deliveryType: 'delivery' as const }),
+            lat, lng, distance, locationVerified: verified,
+            ...(suggestedAddress ? { addressSuggestion: suggestedAddress } : {}),
+            ...(shouldAdoptAddress ? { address: suggestedAddress } : {}),
+        });
+    }, [currentOrder, patchCustomerInfo]);
+
+    /**
+     * SIMULATED authorisation, unchanged in substance from the checkout screen: validate the
+     * fields a real PSP would check, pause so the demo reads like a transaction, then finalise.
+     * A production build must move this to the server and only mark an order paid on a real
+     * gateway response — see README "Known Limitations".
+     */
+    const placeOrder = useCallback(async () => {
+        if (!currentOrder) return;
+
+        // The card already gates on this, but the chat stays live while a card is open: the
+        // waiter can add a line, or the guest can ask it to change how the order is collected,
+        // between reaching the confirm step and pressing the button. Re-check at the point of no
+        // return rather than trusting a check that may be several interactions old. The server
+        // checks it again when the order is posted.
+        const orderCheck = validateOrder(currentOrder);
+        if (!orderCheck.valid) {
+            showToast(firstIssue(orderCheck)?.message ?? 'Please review your order details.', 'error');
+            setStage('checkout');
+            return;
+        }
+
+        await handleOrderComplete(finalizeOrder(currentOrder, 'confirmed'));
+    }, [currentOrder, handleOrderComplete]);
 
     /*
       `@container` is load-bearing, not decoration. This panel is a fixed 420px on desktop but
@@ -516,14 +751,14 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
           // the home indicator. dvh tracks the *visible* viewport, so it is always correct.
           "@container fixed inset-0 md:inset-auto md:bottom-24 md:right-8 w-full md:w-[420px] md:h-[720px] md:max-h-[calc(100vh-120px)] bg-white flex flex-col shadow-[0_40px_90px_-30px_rgba(15,23,42,0.55)] md:rounded-[2.5rem] overflow-hidden border border-white/20 z-50 animate-slide-up ring-8 ring-slate-900/[0.06]";
 
-    /** Escape walks back out: leave a sub-tab first, then close the widget itself. */
+    /** Escape walks back out: dismiss an open card first, then close the widget itself. */
     const handleEscape = useCallback(() => {
-        if (activeTab !== 'chat') {
-            setActiveTab('chat');
+        if (stage !== 'none') {
+            setStage('none');
             return;
         }
         if (!standalone) setIsOpen(false);
-    }, [activeTab, standalone]);
+    }, [stage, standalone]);
 
     // The panel is only modal when it covers the viewport (the /embed route, or the
     // full-screen mobile layout). See lib/hooks/useFocusTrap.ts for why trapping is
@@ -586,16 +821,36 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
                             </div>
                         </div>
                         {!standalone && (
-                            <Button
-                                type="button"
-                                size="icon-lg"
-                                variant="ghost"
-                                onClick={() => setIsOpen(false)}
-                                aria-label="Close the chat"
-                                className="size-10 shrink-0 rounded-xl border border-white/10 bg-white/5 text-slate-300 hover:bg-white/15 hover:text-white"
-                            >
-                                <X className="size-5" aria-hidden="true" />
-                            </Button>
+                            <div className="flex shrink-0 items-center gap-1.5">
+                                {/*
+                                  Starting over throws away a conversation and a basket, so it asks
+                                  twice rather than once. A confirmation dialog would be heavier
+                                  than the action deserves, and a single click is how a guest
+                                  loses an order they had already built.
+                                */}
+                                <Button
+                                    type="button"
+                                    size="icon-lg"
+                                    variant="ghost"
+                                    onClick={handleClearConversation}
+                                    aria-label={clearArmed ? 'Tap again to clear the conversation' : 'Start a new conversation'}
+                                    className={`size-10 shrink-0 rounded-xl border text-slate-300 hover:bg-white/15 hover:text-white ${
+                                        clearArmed ? 'border-red-400/50 bg-red-500/20 text-red-200' : 'border-white/10 bg-white/5'
+                                    }`}
+                                >
+                                    {clearArmed ? <TriangleAlert size={18} aria-hidden="true" /> : <RotateCcw size={18} aria-hidden="true" />}
+                                </Button>
+                                <Button
+                                    type="button"
+                                    size="icon-lg"
+                                    variant="ghost"
+                                    onClick={() => setIsOpen(false)}
+                                    aria-label="Close the chat"
+                                    className="size-10 shrink-0 rounded-xl border border-white/10 bg-white/5 text-slate-300 hover:bg-white/15 hover:text-white"
+                                >
+                                    <X className="size-5" aria-hidden="true" />
+                                </Button>
+                            </div>
                         )}
                     </header>
 
@@ -605,77 +860,168 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
                             <p className="text-[11px] font-bold text-amber-100 leading-snug">
                                 AI temporarily unavailable — browsing, cart and checkout still work.
                             </p>
+                            {/* The banner alone leaves the guest with nothing to do but wait. */}
+                            {retryableText && !isLoading && (
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    onClick={retryLastMessage}
+                                    className="ml-auto h-7 shrink-0 rounded-lg border-amber-300/30 bg-amber-300/10 px-2.5 text-[10px] font-black uppercase tracking-widest text-amber-100 hover:bg-amber-300/20"
+                                >
+                                    <RotateCcw className="size-3" aria-hidden="true" />
+                                    Retry
+                                </Button>
+                            )}
                         </div>
                     )}
 
                     {/*
-                      base-ui's Tabs owns the ARIA tabs pattern end to end: roving tabindex,
-                      arrow/Home/End traversal and the tab-to-panel wiring. The hand-rolled nav
-                      this replaces set the roles and roving tabindex by hand but had no key
-                      handling, so the three tabs were individually reachable yet not traversable.
+                      One column, no tab bar. The three tabs (Chat / Menu / Bag) existed only to
+                      reach screens the waiter can now drive from the thread, and carrying them
+                      meant a guest had to leave the conversation to finish what they had already
+                      said in it.
                     */}
-                    <Tabs
-                        value={activeTab}
-                        onValueChange={(value) => setActiveTab(value as typeof activeTab)}
-                        className="flex min-h-0 flex-1 flex-col"
-                    >
-                        <TabsContent value="chat" className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-gradient-to-b from-slate-50 via-white to-primary/[0.07]">
+                    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-gradient-to-b from-slate-50 via-white to-primary/[0.07]">
+                        {/*
+                          Messages dissolve into the header instead of being guillotined by
+                          it. Sits above the scroller (z-10) and never takes pointer events.
+                        */}
+                        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-slate-50 to-transparent" aria-hidden="true" />
+                        <div className="flex-1 flex flex-col h-full">
                             {/*
-                              Messages dissolve into the header instead of being guillotined by
-                              it. Sits above the scroller (z-10) and never takes pointer events.
+                              role="log" + aria-live is what makes a screen reader announce
+                              the waiter's reply. Without it a blind user has no idea the bot
+                              answered — the single most important defect for a chat product.
                             */}
-                            <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-slate-50 to-transparent" aria-hidden="true" />
-                            <div className="flex-1 flex flex-col h-full">
-                                {/*
-                                  role="log" + aria-live is what makes a screen reader announce
-                                  the waiter's reply. Without it a blind user has no idea the bot
-                                  answered — the single most important defect for a chat product.
-                                */}
-                                <div
-                                    role="log"
-                                    aria-live="polite"
-                                    aria-relevant="additions"
-                                    aria-label="Conversation with SeasonBot"
-                                    ref={logRef}
-                                    className="flex-1 overflow-y-auto px-3.5 pt-4 pb-3 @lg:px-4 no-scrollbar overscroll-contain flex flex-col-reverse"
-                                >
-                                    <div className="flex flex-col gap-2">
-                                        {messages.map(m => <ChatMessage key={m.id} message={m} />)}
-                                        {isLoading && (
-                                            /*
-                                              Three dots rather than skeleton blocks: it reads as
-                                              "the waiter is writing" rather than "the layout is
-                                              broken", and it does not resize when the real bubble
-                                              lands. aria-hidden so the live region does not
-                                              announce a placeholder.
-                                            */
-                                            <div
-                                                className="flex items-end gap-2"
-                                                aria-hidden="true"
-                                            >
-                                                {/* Must mirror ChatMessage's avatar and bubble metrics exactly, or it pops when the real message lands. */}
-                                                <div className="size-8 rounded-[1.1rem] bg-gradient-to-br from-primary to-emerald-400 flex items-center justify-center shrink-0 shadow-[0_6px_18px_-8px_oklch(0.841_0.238_128.85/0.85)]">
-                                                    <Bot className="size-3.5 text-primary-foreground" strokeWidth={2.5} />
-                                                </div>
-                                                <div className="bg-gradient-to-br from-white to-primary/[0.06] border border-slate-200/70 rounded-[1.6rem] rounded-tl-md px-4 py-3 shadow-[0_6px_24px_-14px_rgba(15,23,42,0.35)]">
-                                                    <div className="flex items-center gap-1.5">
-                                                        {[0, 150, 300].map(delay => (
-                                                            <span
-                                                                key={delay}
-                                                                className="size-2 rounded-full bg-primary animate-pulse"
-                                                                style={{ animationDelay: `${delay}ms` }}
-                                                            />
-                                                        ))}
-                                                    </div>
+                            <div
+                                role="log"
+                                aria-live="polite"
+                                aria-relevant="additions"
+                                aria-label="Conversation with SeasonBot"
+                                ref={logRef}
+                                className="flex-1 overflow-y-auto px-3.5 pt-4 pb-3 @lg:px-4 no-scrollbar overscroll-contain flex flex-col-reverse"
+                            >
+                                <div className="flex flex-col gap-2">
+                                    {messages.map(m => <ChatMessage key={m.id} message={m} />)}
+                                    {isLoading && (
+                                        /*
+                                          Three dots rather than skeleton blocks: it reads as
+                                          "the waiter is writing" rather than "the layout is
+                                          broken", and it does not resize when the real bubble
+                                          lands. aria-hidden so the live region does not
+                                          announce a placeholder.
+                                        */
+                                        <div
+                                            className="flex items-end gap-2"
+                                            aria-hidden="true"
+                                        >
+                                            {/* Must mirror ChatMessage's avatar and bubble metrics exactly, or it pops when the real message lands. */}
+                                            <div className="size-8 rounded-[1.1rem] bg-gradient-to-br from-primary to-emerald-400 flex items-center justify-center shrink-0 shadow-[0_6px_18px_-8px_oklch(0.841_0.238_128.85/0.85)]">
+                                                <Bot className="size-3.5 text-primary-foreground" strokeWidth={2.5} />
+                                            </div>
+                                            <div className="bg-gradient-to-br from-white to-primary/[0.06] border border-slate-200/70 rounded-[1.6rem] rounded-tl-md px-4 py-3 shadow-[0_6px_24px_-14px_rgba(15,23,42,0.35)]">
+                                                <div className="flex items-center gap-1.5">
+                                                    {[0, 150, 300].map(delay => (
+                                                        <span
+                                                            key={delay}
+                                                            className="size-2 rounded-full bg-primary animate-pulse"
+                                                            style={{ animationDelay: `${delay}ms` }}
+                                                        />
+                                                    ))}
                                                 </div>
                                             </div>
-                                        )}
-                                        <div ref={messagesEndRef} />
-                                    </div>
+                                        </div>
+                                    )}
+
+                                    {/*
+                                      The active card rides at the end of the thread, the same
+                                      place the typing dots do, so it reads as the waiter's next
+                                      move rather than as a screen that replaced the chat.
+                                    */}
+                                    {stage !== 'none' && currentOrder !== undefined && (
+                                        <div className="px-1 pt-1">
+                                            {stage === 'menu' && (
+                                                <MenuPickerCard
+                                                    /*
+                                                      Keyed on the requested section so closing
+                                                      the card and asking for a different one
+                                                      mounts a fresh component. Without it React
+                                                      reuses the instance and the new request
+                                                      arrives pre-filtered by the old one.
+                                                    */
+                                                    key={`${focusCategoryId ?? 'all'}/${focusSubcategoryId ?? 'all'}`}
+                                                    focusCategoryId={focusCategoryId}
+                                                    focusSubcategoryId={focusSubcategoryId}
+                                                    cartCounts={cartCounts}
+                                                    onAdd={item => processOrderAction({
+                                                        action: 'add',
+                                                        items: [{ item_code: item.code, quantity: 1 }],
+                                                    })}
+                                                    onClose={closeCard}
+                                                />
+                                            )}
+                                            {stage === 'basket' && currentOrder && (
+                                                <BasketCard
+                                                    order={currentOrder}
+                                                    onQuantity={changeQuantity}
+                                                    onCheckout={() => setStage('checkout')}
+                                                    onClose={closeCard}
+                                                />
+                                            )}
+                                            {stage === 'checkout' && currentOrder && (
+                                                <CheckoutCard
+                                                    draft={currentOrder}
+                                                    onCustomerChange={patchCustomerInfo}
+                                                    onLocation={handleLocationSelect}
+                                                    onContinue={() => setStage('payment')}
+                                                    onBack={() => setStage('basket')}
+                                                    onClose={closeCard}
+                                                />
+                                            )}
+                                            {stage === 'payment' && currentOrder && (
+                                                <PlaceOrderCard
+                                                    order={currentOrder}
+                                                    onPlace={placeOrder}
+                                                    placing={placingOrder}
+                                                    onBack={() => setStage('checkout')}
+                                                    onClose={closeCard}
+                                                />
+                                            )}
+                                        </div>
+                                    )}
+                                    <div ref={messagesEndRef} />
                                 </div>
+                            </div>
 
                                 {/* safe-b-4 keeps the composer clear of the iOS home indicator. */}
                                 <div className="p-4 bg-white/80 backdrop-blur-2xl border-t border-slate-200/60 relative z-20 safe-b-4">
+                                    {/*
+                                      Replaces the Bag tab. A running total has to stay visible
+                                      while the guest is still talking, otherwise the only way
+                                      to see what they had ordered was to go and look.
+                                    */}
+                                    {currentOrder && currentOrder.items.length > 0 && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setStage(stage === 'basket' ? 'none' : 'basket')}
+                                            aria-expanded={stage === 'basket'}
+                                            className="mb-2.5 flex w-full items-center gap-2.5 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-left shadow-sm transition-colors hover:border-primary-ink/30 hover:bg-primary/5"
+                                        >
+                                            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary-ink">
+                                                <ShoppingBag className="size-4" aria-hidden="true" />
+                                            </span>
+                                            <span className="min-w-0 flex-1">
+                                                <span className="block text-[11px] font-black text-slate-900">
+                                                    {currentOrder.items.length} {currentOrder.items.length === 1 ? 'item' : 'items'} in your basket
+                                                </span>
+                                                <span className="block truncate text-[10px] text-slate-500">
+                                                    {currentOrder.items.map(i => `${i.quantity}× ${i.name}`).join(', ')}
+                                                </span>
+                                            </span>
+                                            <span className="shrink-0 text-[13px] font-black tabular-nums text-primary-ink">৳{currentOrder.subtotal}</span>
+                                        </button>
+                                    )}
+
                                     {suggestions.length > 0 && (
                                         <div className="mb-3" aria-label="Suggestions for your order">
                                             <p className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-slate-500 pl-1 mb-1.5">
@@ -725,6 +1071,7 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
                                                 <FieldLabel htmlFor="seasonbot-input" className="sr-only">Message SeasonBot</FieldLabel>
                                                 <Input
                                                     id="seasonbot-input"
+                                                    ref={composerRef}
                                                     data-autofocus
                                                     type="text"
                                                     value={input}
@@ -766,48 +1113,7 @@ export const ChatWidget = memo(({ initiallyOpen = false, standalone = false, aiC
                                     </div>
                                 </div>
                             </div>
-                        </TabsContent>
-
-                        <TabsContent value="menu" className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50/50">
-                            <OrderWizard
-                                initialView="menu"
-                                onClose={() => setActiveTab('chat')}
-                                onSubmit={handleOrderComplete}
-                                currentOrder={currentOrder}
-                                onUpdateOrder={updateOrder}
-                                initialCategoryId={targetCategory}
-                                initialSubCategoryId={targetSubCategory}
-                                showToast={showToast}
-                                isTabMode
-                            />
-                        </TabsContent>
-
-                        <TabsContent value="cart" className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50/50">
-                            <OrderWizard
-                                initialView="cart"
-                                onClose={() => setActiveTab('chat')}
-                                onSubmit={handleOrderComplete}
-                                currentOrder={currentOrder}
-                                onUpdateOrder={updateOrder}
-                                showToast={showToast}
-                                isTabMode
-                            />
-                        </TabsContent>
-
-                        <TabsList
-                            aria-label="SeasonBot sections"
-                            // The base list no longer pins a height (see the note in
-                            // components/ui/tabs.tsx), so this bar grows to fit its content. The
-                            // vertical rhythm is therefore deliberately tight — an icon chip, a
-                            // 4px gap and a single-line label — to keep it near 60px rather than
-                            // eating the conversation above it.
-                            className="relative h-auto w-full shrink-0 items-stretch justify-between gap-1 rounded-none border-t border-white/5 bg-gradient-to-t from-slate-950 via-slate-900 to-slate-950 px-2.5 py-1.5 @lg:px-3 @lg:py-2 safe-b-2 before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-gradient-to-r before:from-transparent before:via-primary/50 before:to-transparent"
-                        >
-                            <TabTrigger value="chat" icon={<MessageSquare aria-hidden="true" />} label="Chat" />
-                            <TabTrigger value="menu" icon={<Menu aria-hidden="true" />} label="Menu" />
-                            <TabTrigger value="cart" icon={<ShoppingBag aria-hidden="true" />} label="Bag" badge={totalItems} />
-                        </TabsList>
-                    </Tabs>
+                        </div>
                 </main>
             )}
         </>
@@ -819,15 +1125,10 @@ ChatWidget.displayName = 'ChatWidget';
 /**
  * A full-bleed row of chips that scrolls sideways, with a chevron at each edge.
  *
- * Two reasons it is built this way. The strip is inset by the composer's side padding, so
- * without the negative margin it stops short of the widget edge and leaves dead space; the
- * negative margin cancels that while inner padding keeps the first and last chip aligned. And
- * because the scrollbar is hidden, a row that overflows gives no hint that it scrolls at all —
- * hence the chevrons, which are real buttons so they stay keyboard reachable.
- *
- * Each chevron hides itself once its end of travel is reached, rather than scrolling into
- * nothing. `visibility: hidden` does the hiding, so a disabled arrow also drops out of the tab
- * order instead of leaving focus on something invisible.
+ * The negative margin cancels the composer's inset padding so the strip reaches the widget edge
+ * while the first and last chips stay aligned. The chevrons exist because the scrollbar is hidden,
+ * and an overflowing row would otherwise give no hint that it scrolls. Each chevron hides itself
+ * at the end of its travel, using `visibility` so a disabled arrow also leaves the tab order.
  */
 function ScrollChips({ label, children }: { label: string, children: React.ReactNode }) {
     const trackRef = useRef<HTMLDivElement>(null);
@@ -899,38 +1200,5 @@ function ScrollChips({ label, children }: { label: string, children: React.React
                 <ChevronRight className="size-4" aria-hidden="true" />
             </Button>
         </div>
-    );
-}
-
-/**
- * The bottom nav trigger. `TabsTrigger` supplies the ARIA tab semantics, the selected state
- * and focus ring; this only adds the icon-over-label layout and the bag counter.
- */
-function TabTrigger({ value, icon, label, badge }: { value: 'chat' | 'menu' | 'cart', icon: React.ReactNode, label: string, badge?: number }) {
-    return (
-        <TabsTrigger
-            value={value}
-            // `flex-1` (inherited) is what gives the three tabs equal columns; the previous
-            // fixed `w-24` fought it. `data-active:bg-*` must be restated because the base
-            // trigger paints a white `bg-background` pill, which is invisible-to-ugly here.
-            className="group/tab relative h-auto flex-1 flex-col items-center justify-center gap-1 rounded-xl px-2 py-1 text-slate-400 transition-colors duration-200 hover:bg-white/5 hover:text-white dark:hover:bg-white/10 dark:hover:text-foreground data-active:bg-primary/10 data-active:text-primary dark:data-active:bg-primary/15 data-active:shadow-none"
-        >
-            <span className="relative flex size-7 items-center justify-center rounded-xl transition-colors duration-200 group-data-active/tab:bg-primary/15 group-data-active/tab:shadow-[inset_0_0_0_1px_oklch(0.841_0.238_128.85/0.3)]">
-                {icon}
-                {/*
-                  The counter is anchored to the icon, not to the trigger: at the trigger's own
-                  top-right it floated ~40px away from a 16px glyph and overhung the bar's edge.
-                  The ring matches the bar so it reads as a cut-out, and it inverts to dark-on-lime
-                  when the tab is active, where a lime badge would vanish into the tint.
-                */}
-                {badge !== undefined && badge > 0 && (
-                    <Badge className="absolute -right-2 -top-2 h-3.5 min-w-3.5 gap-0 border-0 bg-primary px-1 py-0 text-[8px] font-black leading-none text-primary-foreground tabular-nums ring-2 ring-slate-900 animate-bounce-short group-data-active/tab:bg-slate-950 group-data-active/tab:text-primary group-data-active/tab:ring-primary/40">
-                        <span className="sr-only">{badge} items in bag</span>
-                        <span aria-hidden="true">{badge}</span>
-                    </Badge>
-                )}
-            </span>
-            <span className="text-[10px] leading-none font-black uppercase tracking-widest">{label}</span>
-        </TabsTrigger>
     );
 }

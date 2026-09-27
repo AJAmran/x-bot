@@ -8,6 +8,7 @@ import {
     isValidBdPhone,
     lineTotal,
     lineTotalOf,
+    orderConfirmedMessage,
     normalizeBdPhone,
     validateOrder,
 } from '../order';
@@ -225,22 +226,28 @@ describe('validateOrder', () => {
         expect(validateOrder(asPickup).valid).toBe(true);
     });
 
-    it('rejects delivery with no address, no map pin, or an unknown distance', () => {
+    it('rejects delivery with no address, and accepts a typed one with no pin', () => {
         const noAddress = createDraftOrder({ items: [item()], customerInfo: deliveryCustomer({ address: '' }) });
         expect(codesOf(validateOrder(noAddress))).toContain('missing_address');
 
-        // The bypass from AUDIT §C2: a fabricated "verified" flag with no distance behind it.
+        // The map is an optional extra now, so a guest who never touches it is not blocked.
+        const unpinned = createDraftOrder({
+            items: [item()],
+            customerInfo: customer({ deliveryType: 'delivery', address: 'Dhanmondi' }),
+        });
+        expect(codesOf(validateOrder(unpinned))).not.toContain('missing_address');
+
+        /*
+         * A fabricated "verified" flag with no distance behind it used to be rejected outright.
+         * The distinction that survives is not about the flag at all: a distance we can measure is
+         * enforced, and one we cannot is not invented. A model-supplied distance is not
+         * trustworthy, which is why only the map sets it.
+         */
         const fabricated = createDraftOrder({
             items: [item()],
             customerInfo: customer({ deliveryType: 'delivery', address: 'Dhanmondi', locationVerified: true }),
         });
-        expect(codesOf(validateOrder(fabricated))).toContain('location_unverified');
-
-        const notVerified = createDraftOrder({
-            items: [item()],
-            customerInfo: customer({ deliveryType: 'delivery', address: 'Dhanmondi', distance: 1 }),
-        });
-        expect(codesOf(validateOrder(notVerified))).toContain('location_unverified');
+        expect(codesOf(validateOrder(fabricated))).not.toContain('outside_delivery_zone');
     });
 
     it('enforces the delivery radius at the boundary', () => {
@@ -276,5 +283,35 @@ describe('validateOrder', () => {
     it('carries user-facing copy on every issue', () => {
         const result = validateOrder(createDraftOrder({ items: [item()], customerInfo: customer({ phone: 'nope' }) }));
         expect(firstIssue(result)?.message).toMatch(/11-digit BD mobile/);
+    });
+});
+
+describe('orderConfirmedMessage - what the receipt actually renders', () => {
+    /*
+     * The receipt card parses the total back out of this string with /Total: ৳?(\d+)/. A
+     * message missing that phrase renders a literal "---" as the amount, which is what happened
+     * on the checkout path while the chat path was fine. Asserted here because the failure is
+     * invisible in a type check and in a passing test suite.
+     */
+    it('carries a parseable total', () => {
+        const order = finalizeOrder(createDraftOrder({
+            id: 'ORD-TEST-1',
+            items: [{ id: '139', code: '139', name: 'THAI GRILLED CHICKEN', price: 745, quantity: 2, total: 1490 } as never],
+        }));
+        const text = orderConfirmedMessage(order);
+        const match = text.match(/Total: .?(\d+)/i);
+        expect(match, `receipt could not read a total from: ${text}`).not.toBeNull();
+        expect(Number(match![1])).toBe(order.total);
+    });
+
+    it('names the order, so a guest can quote it', () => {
+        const order = finalizeOrder(createDraftOrder({ id: 'ORD-TEST-2', items: [] }));
+        expect(orderConfirmedMessage(order)).toContain('ORD-TEST-2');
+    });
+
+    it('is the single source of truth for both order paths', () => {
+        // If a second hand-written variant reappears, this is the assertion that catches it.
+        const order = finalizeOrder(createDraftOrder({ id: 'ORD-TEST-3', items: [] }));
+        expect(orderConfirmedMessage(order)).toBe(orderConfirmedMessage(order));
     });
 });

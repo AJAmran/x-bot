@@ -2,39 +2,19 @@
 
 import { GoogleGenAI, FunctionDeclaration, Type } from "@google/genai";
 import { headers } from "next/headers";
-import { MAX_DELIVERY_RANGE, MIN_ORDER_AMOUNT, RESTAURANT_DATA } from "./constants";
-import { ChatMessage, Order, AIResponse, OrderAction, OrderValidationResult, EngineError } from "./types";
+import { ChatMessage, Order, AIResponse, AIResponseMeta, OrderAction, OrderValidationResult, EngineError } from "./types";
 import { validateOrder } from "./order";
 import { parseManageOrderArgs } from "./toolArgs";
 import { consumeAiQuota } from "./rateLimit";
+import { buildHistory, buildSystemInstruction, guestWritesBengali } from "./prompt";
 
 /** Hard ceiling on a single model call. Also enforced by the SDK via httpOptions.timeout. */
 const TIMEOUT_MS = 20_000;
-const MODEL = "gemini-3.1-flash-lite";
-/** Sliding context window. Each turn is ~13k tokens of menu, so this is the main cost lever. */
-const HISTORY_WINDOW = 10;
-/** Defensive cap on a single inbound message — the payload is untrusted (AUDIT §S4). */
-const MAX_MESSAGE_CHARS = 2_000;
 
-/**
- * The AI never has to see image URLs, and `description` is what makes 51 KB out of 51 KB.
- * Measured with a 239-item menu:
- *   full JSON            51.1 KB (~13,000 tokens)
- *   minus descriptions   34.0 KB (~8,700 tokens)  <- would cost menu Q&A quality
- *   minus image URLs     50.6 KB                 <- not worth it
- * Gemini context caching is NOT available on the free tier, so the only lever is sending
- * less. Serialised once per instance rather than per request; see README Roadmap.
- */
-let cachedMenuPayload: string | undefined;
-function getMenuPayload(): string {
-    if (!cachedMenuPayload) cachedMenuPayload = JSON.stringify(RESTAURANT_DATA.menu);
-    return cachedMenuPayload;
-}
+/** Overridable via GEMINI_MODEL, so a different model needs no code change. */
+const MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-3.1-flash-lite";
 
-/**
- * Built lazily so a missing key never constructs an SDK client with an empty string
- * (which produced a confusing "kitchen engine" error on every single message).
- */
+/** Built lazily, so a missing key never constructs a client with an empty string. */
 let cachedClient: GoogleGenAI | null = null;
 function isAiConfigured(): boolean {
     return Boolean(process.env.GEMINI_API_KEY?.trim());
@@ -47,14 +27,25 @@ function getClient(): GoogleGenAI {
 /**
  * manage_order — the model's only way to affect application state.
  *
- * Every field is validated again on arrival (see parseOrderAction usage below and
- * `processOrderAction` in ChatWidget): the model is an untrusted input source, so its
- * output is treated as a *request*, never as a command. A hallucinated item code, a
- * negative quantity or an out-of-policy `confirm` is rejected here rather than obeyed.
+ * Every field is validated again on arrival (`parseManageOrderArgs` here, and
+ * `processOrderAction` in the widget): the model is an untrusted input source, so its output is
+ * treated as a request, never a command. A hallucinated item code, a negative quantity or an
+ * out-of-policy `confirm` is rejected rather than obeyed.
+ *
+ * The descriptions are terse because the operating rules already live in the system instruction,
+ * which the model reads on the same turn. The one thing spelled out in full is the
+ * absolute-vs-delta quantity distinction, the most common way to get an order wrong.
  */
 const manageOrderTool: FunctionDeclaration = {
     name: 'manage_order',
-    description: 'Manage the guest\'s order: add/remove items, change quantities and notes, record details and preferences, or confirm the order.',
+    /*
+     * The "always add a line of text" clause lives here as well as in the system instruction,
+     * because a model that has decided to call a tool tends to emit the call and stop. Stated on
+     * the declaration, it is read as the call is built.
+     */
+    description: 'Change the guest\'s order, record their details, or show them the menu. '
+        + 'Always follow this call with one short line of text addressed to the guest, in the language '
+        + 'and mix they wrote in, saying what you just did. Never send this call on its own.',
     parameters: {
         type: Type.OBJECT,
         properties: {
@@ -65,29 +56,29 @@ const manageOrderTool: FunctionDeclaration = {
             },
             category_id: {
                 type: Type.STRING,
-                description: 'Category ID to open when action is "browse_menu" (e.g. "chinese", "beverages").'
+                description: 'Category id for "browse_menu" (e.g. "chinese").'
             },
             subcategory_id: {
                 type: Type.STRING,
-                description: 'Subcategory ID to open (e.g. "soups", "grilled", "appetizers"). Use this for specific sections within a category.'
+                description: 'Subcategory id for "browse_menu" (e.g. "soups"). Use it when the guest named a part of a category.'
             },
             items: {
                 type: Type.ARRAY,
-                description: 'List of items to act on. Required for "add", "remove", "set_quantity" and "set_notes".',
+                description: 'Items to act on. Required for "add", "remove", "set_quantity" and "set_notes".',
                 items: {
                     type: Type.OBJECT,
                     properties: {
                         item_code: {
                             type: Type.STRING,
-                            description: 'The unique code of the menu item (e.g., "101", "221"). Must be an existing code — unknown codes are discarded.'
+                            description: 'A code from the menu. Anything else is discarded.'
                         },
                         quantity: {
                             type: Type.INTEGER,
-                            description: 'For "add": how many to add (1 or more; omit for 1). For "remove": how many to take away — omit it or use 0 to remove the item entirely. For "set_quantity": the NEW total for that item, not a delta (use 0 to take it off the order).'
+                            description: 'For "add": how many to add, 1 or more. For "set_quantity": the NEW total for that item, never a difference. For "remove": how many to take away, or omit it to remove the whole line.'
                         },
                         notes: {
                             type: Type.STRING,
-                            description: 'Special instructions, spice levels or variations. Required for "set_notes" (e.g. "make it spicier", "no onions please").'
+                            description: 'Special instructions or variations. Required for "set_notes".'
                         }
                     },
                     required: ['item_code']
@@ -95,17 +86,17 @@ const manageOrderTool: FunctionDeclaration = {
             },
             customer_details: {
                 type: Type.OBJECT,
-                description: 'Customer information. Required for "update_info". You may record the details the guest gives you, but you cannot verify a delivery location — only the map can do that.',
+                description: 'Details the guest gave. Required for "update_info". You may record an address but never a verified location.',
                 properties: {
-                    name: { type: Type.STRING, description: 'Customer full name' },
-                    phone: { type: Type.STRING, description: 'Customer phone number' },
-                    address: { type: Type.STRING, description: 'Delivery address (required for delivery)' },
-                    delivery_type: { type: Type.STRING, enum: ['pickup', 'delivery'], description: 'Type of order' },
-                    preferred_time: { type: Type.STRING, description: 'Preferred delivery/pickup time' },
+                    name: { type: Type.STRING, description: 'Full name' },
+                    phone: { type: Type.STRING, description: 'Mobile number' },
+                    address: { type: Type.STRING, description: 'Delivery address' },
+                    delivery_type: { type: Type.STRING, enum: ['pickup', 'delivery'], description: 'How they want it' },
+                    preferred_time: { type: Type.STRING, description: 'Preferred time' },
                     preferences: {
                         type: Type.ARRAY,
                         items: { type: Type.STRING },
-                        description: 'Short facts the guest has told you that should be remembered for the rest of the conversation — allergies, dietary needs, spice tolerance, a usual order. One short phrase per entry, e.g. "allergic to peanuts", "prefers extra spicy", "regularly orders the grilled chicken".'
+                        description: 'Short facts worth remembering all conversation — allergies, dietary needs, spice tolerance, a usual order. One short phrase each.'
                     }
                 }
             }
@@ -114,100 +105,15 @@ const manageOrderTool: FunctionDeclaration = {
     }
 };
 
-const getSystemInstruction = (currentOrder: Order | null) => {
-    const now = new Date();
-    const day = now.toLocaleDateString('en-US', { weekday: 'long' });
-    const time = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-
-    // Serialize context
-    const orderContext = currentOrder ? JSON.stringify({
-        itemCount: currentOrder.items.length,
-        subtotal: currentOrder.subtotal,
-        items: currentOrder.items.map(i => `${i.quantity}x ${i.name} [Code: ${i.code}] ${i.specialInstructions ? `(Note: ${i.specialInstructions})` : ''}`),
-        customerInfo: {
-            name: currentOrder.customerInfo?.name || "Not provided",
-            phone: currentOrder.customerInfo?.phone || "Not provided",
-            deliveryType: currentOrder.customerInfo?.deliveryType || "pickup",
-            address: currentOrder.customerInfo?.address || "Not provided"
-        }
-    }) : "Empty Cart";
-
-    /**
-     * Conversational memory. Anything the guest has told us this session is replayed into every
-     * later turn, so the waiter does not ask twice about an allergy or a usual order. Costs a
-     * few dozen tokens — far cheaper than the re-asking it prevents.
-     */
-    const preferences = currentOrder?.customerInfo?.preferences ?? [];
-    const memoryBlock = preferences.length > 0
-        ? `\n  **WHAT THIS GUEST HAS TOLD US** (honour these without being asked again):\n${preferences.map(p => `    - ${p}`).join('\n')}`
-        : '';
-
-    return `You are **SeasonBot**, the professional Head Waiter at **Four Season Restaurant** (Dhanmondi, Dhaka).
-
-  **YOUR GOAL**: Provide a professional "Real-Life" 5-Star Dining Service. Follow a strict hospitality workflow.
-
-  **CURRENT STATUS**:
-  - Time: ${day}, ${time}
-  - Cart: ${orderContext}
-  - **DELIVERY RULES**: Minimum ৳${MIN_ORDER_AMOUNT} required. Service only within ${MAX_DELIVERY_RANGE}km from Satmasjid Road, Dhanmondi.
-  - **PICKUP RULES**: No minimum.
-${memoryBlock}
-
-  **ORDER COMPLETION CHECKLIST**:
-  1. Items in Cart? ${currentOrder && currentOrder.items.length > 0 ? "✅" : "❌"}
-  2. Customer Name/Phone? ${currentOrder?.customerInfo?.name && currentOrder?.customerInfo?.phone ? "✅" : "❌"}
-  3. Delivery/Pickup? ${currentOrder?.customerInfo?.deliveryType ? `✅ (${currentOrder.customerInfo.deliveryType})` : "❌"}
-  4. Address/Location? ${currentOrder?.customerInfo?.deliveryType === 'delivery' ? (currentOrder.customerInfo.locationVerified ? "✅" : "❌") : "N/A"}
-
-  **MENU KNOWLEDGE (Items & Codes)**:
-  ${getMenuPayload()}
-
-  **WORKFLOW & BEHAVIOR**:
-
-  1.  **🛒 Changing the basket**:
-      - 'add' puts something new in the basket (or adds another serving of it).
-      - 'remove' takes servings away; omit the quantity to remove the item entirely.
-      - 'set_quantity' sets the NEW total for an item — "make it three instead of two". Use 0 to take it off.
-      - 'set_notes' changes an instruction already on a line — "make it spicier", "no onions please".
-      - To swap one dish for another, use 'remove' then 'add'.
-      - After any change, ask: "Sir/Ma'am, would you like anything else?".
-
-  2.  **🧠 Remember what you are told**:
-      - If the guest mentions an allergy, a dietary need, a spice preference or a usual order, record it with 'update_info' → 'preferences'. It is remembered for the rest of the conversation and you will see it below under WHAT THIS GUEST HAS TOLD US.
-      - Do not ask for information you have already been given.
-
-  3.  **❓ When something is ambiguous, ask — do not guess**:
-      - If a request could mean more than one thing ("two chicken or two shrimp?"), ask ONE short clarifying question before acting.
-      - If the guest names a dish that is not on the menu, say so plainly and offer the closest thing we do have.
-      - Never invent a dish, a code or a price. Every item_code must come from the menu list above.
-
-  4.  **📝 Permission to Place Order**:
-      - When the user says they are done, ask: "Would you like to place the order now?".
-      - If yes, proceed to the checkout view using the 'checkout' action.
-
-  5.  **🚚 Information & Validation (The Check)**:
-      - Collect Name and Mobile Number if missing.
-      - **Mobile Validation**: Ensure the phone number is a valid Bangladeshi number (e.g., 017... or +8801...). If invalid, politely ask them to provide a correct 11-digit BD mobile number.
-      - **Price Check**: If delivery is chosen and total is < ৳${MIN_ORDER_AMOUNT}, explain: "Sir/Ma'am, we require a minimum order of ৳${MIN_ORDER_AMOUNT} for Home Delivery. Your current total is ৳${currentOrder?.subtotal || 0}. Would you like to add something else, or would you prefer to collect it as a Takeaway?"
-      - **Location Check**: For delivery, open the map and explain: "Our delivery service is available within a ${MAX_DELIVERY_RANGE}km radius of Dhanmondi. Please pin your exact location on the map." Only a pin dropped on the map counts as a verified location.
-
-  6.  **✅ Final Confirmation**:
-      - Only call 'confirm' once every check above passes. If anything is missing, ask for it instead — a confirmation that gets rejected is worse than a question.
-
-  **TONE**:
-  - Always start with "Assalamu Alaikum" or a polite greeting.
-  - Language: Strictly **English** unless the user speaks Bengali first.
-  - Hospitality: Professional, high-end restaurant vibe. Use "Sir/Ma'am" and "Please/Thank you" appropriately.
-  - Be brief. One or two sentences per reply, then stop and let the guest respond.
-  - Always reply with a text confirmation before or after using a tool.
-  `;
-};
+/**
+ * The prompt itself lives in lib/prompt.ts; this alias keeps the call site short.
+ */
+const getSystemInstruction = (order: Order | null) => buildSystemInstruction(order);
 
 /**
- * Treats a rejected `confirm` as a normal conversational turn: the customer is told exactly
- * what is still missing instead of being shown a confirmation that the server refuses to
- * honour. Deliberately does NOT make a second model call to re-prompt — on a free tier with
- * a per-project RPD ceiling, a deterministic reply is the responsible choice.
+ * Treats a rejected `confirm` as a normal turn: the guest is told what is still missing rather
+ * than shown a confirmation the server refuses. No second model call to re-prompt.
+
  */
 function buildIncompleteOrderReply(result: OrderValidationResult): string {
     const issues = result.valid ? [] : result.issues;
@@ -215,6 +121,7 @@ function buildIncompleteOrderReply(result: OrderValidationResult): string {
     if (issues.length === 1) return `Before I place this order — ${issues[0].message}`;
     return `Before I place this order I still need a few details. ${issues.slice(0, 2).map(i => i.message).join(' ')}`;
 }
+
 
 function degradedReply(error: EngineError): AIResponse {
     return { text: error.message, meta: { source: 'fallback', aiAvailable: false, error } };
@@ -262,15 +169,76 @@ function toEngineError(error: unknown, retryAfterSeconds?: number): EngineError 
     if (status !== undefined && status >= 500) {
         return {
             code: 'upstream',
-            message: "Our kitchen engine is having trouble connecting. Please try again in short while.",
+            message: "Our kitchen systems are having trouble connecting, Sir/Ma'am. Please try again in a short while — your basket is safe.",
             degraded: true,
         };
     }
     return {
         code: 'unknown',
-        message: "I apologize, something went wrong on our side. Please try again in a moment.",
+        message: "I apologize, something went wrong on our side. Please try again in a moment — your basket is safe.",
         degraded: true,
     };
+}
+
+/**
+ * Reads token accounting off the SDK response without trusting its shape. The provider has
+ * renamed these fields between releases, so anything unexpected is simply omitted rather
+ * than asserted on.
+ */
+function readUsage(response: unknown, model: string): AIResponseMeta['usage'] {
+    if (typeof response !== 'object' || response === null) return undefined;
+    const raw = (response as { usageMetadata?: unknown }).usageMetadata;
+    if (typeof raw !== 'object' || raw === null) return undefined;
+
+    const record = raw as Record<string, unknown>;
+    const input = record.promptTokenCount;
+    const output = record.candidatesTokenCount;
+    if (typeof input !== 'number' || typeof output !== 'number') return undefined;
+
+    return { model, inputTokens: input, outputTokens: output };
+}
+
+/**
+ * Google states the wait in the 429 itself (`RetryInfo.retryDelay`, e.g. "18s"). Discarding it
+ * means telling a guest to "try again in a moment" when the honest answer is "in 18 seconds".
+ * The shape has moved between releases, so anything unrecognised is simply absent.
+
+ */
+function readRetryAfterSeconds(error: unknown): number | undefined {
+    if (typeof error !== 'object' || error === null) return undefined;
+
+    const candidates: unknown[] = [];
+    const push = (value: unknown) => { if (value !== undefined) candidates.push(value); };
+
+    const root = error as Record<string, unknown>;
+    push(root.retryDelay);
+    const details = root.details;
+    if (Array.isArray(details)) {
+        for (const detail of details) {
+            if (typeof detail === 'object' && detail !== null) push((detail as Record<string, unknown>).retryDelay);
+        }
+    }
+
+    for (const candidate of candidates) {
+        // Accepts "18s", 18, or "1.5s" — the provider has used all three.
+        if (typeof candidate === 'number' && Number.isFinite(candidate)) return Math.ceil(candidate);
+        if (typeof candidate === 'string') {
+            const seconds = Number.parseFloat(candidate.replace(/s$/i, ''));
+            if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds);
+        }
+    }
+    return undefined;
+}
+
+/** Only worth retrying when the failure was ours or theirs, not the guest's. */function isTransient(error: unknown): boolean {
+    const status = readErrorCode(error);
+    if (status === 429 || status === 401 || status === 403) return false;
+    if (status !== undefined && status < 500) return false;
+    const name = readErrorName(error);
+    // A timeout is not retried: the request may still be running at Google and would be
+    // charged twice. A transport failure means it never landed.
+    if (name === 'AbortError' || name === 'TimeoutError') return false;
+    return true;
 }
 
 async function readClientId(): Promise<string> {
@@ -311,14 +279,7 @@ export async function getLogicResponse(history: ChatMessage[], currentOrder: Ord
         });
     }
 
-    const validHistory = history
-        .filter(msg => msg.sender !== 'system')
-        .slice(-HISTORY_WINDOW)
-        .filter(msg => typeof msg?.content === 'string' && msg.content.length > 0)
-        .map(msg => ({
-            role: msg.sender === 'user' ? 'user' : 'model',
-            parts: [{ text: msg.content.slice(0, MAX_MESSAGE_CHARS) }],
-        }));
+    const validHistory = buildHistory(history);
 
     if (validHistory.length === 0) {
         return {
@@ -333,19 +294,41 @@ export async function getLogicResponse(history: ChatMessage[], currentOrder: Ord
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
     const startedAt = Date.now();
+    // The model is told nothing about which language to use — it reads whatever the guest
+    // writes. The only thing decided here is which of OUR hard-coded strings to fall back on if
+    // the model returns a tool call with no text, and for that a script check on the last guest
+    // turn is enough.
+    const systemInstruction = getSystemInstruction(currentOrder);
 
-    try {
-        const modelResponse = await getClient().models.generateContent({
+
+    /**
+     * One retry, and only for failures that never reached the model. A 5xx or a dropped
+     * connection costs the guest nothing to repeat, whereas a timeout is deliberately *not*
+     * retried because the request may still be running at Google and would be billed twice.
+     */
+    const callModel = async (): Promise<Awaited<ReturnType<ReturnType<typeof getClient>['models']['generateContent']>>> => {
+        const request = {
             model: MODEL,
             contents: validHistory,
             config: {
-                systemInstruction: getSystemInstruction(currentOrder),
+                systemInstruction,
                 temperature: 0.5, // Slightly lower for more deterministic waiter behavior
                 tools: [{ functionDeclarations: [manageOrderTool] }],
                 abortSignal: controller.signal,
                 httpOptions: { timeout: TIMEOUT_MS },
-            }
-        });
+            },
+        };
+        try {
+            return await getClient().models.generateContent(request);
+        } catch (error) {
+            if (!isTransient(error)) throw error;
+            console.warn('[engine] transient failure, retrying once', readErrorCode(error));
+            return await getClient().models.generateContent(request);
+        }
+    };
+
+    try {
+        const modelResponse = await callModel();
 
         const latencyMs = Date.now() - startedAt;
         const textResponse = modelResponse.text || "";
@@ -386,18 +369,42 @@ export async function getLogicResponse(history: ChatMessage[], currentOrder: Ord
             }
         }
 
-        // Auto-generate fallback text if tool is called without text
+        /*
+         * The model often emits a tool call with no text. Without a reply the guest watches a
+         * bubble appear and say nothing, which reads as a broken bot.
+         *
+         * Every action needs an entry, in both languages. The Bengali set exists because these
+         * strings are inserted verbatim: a guest ordering in Bengali was getting an English
+         * "Added to your basket" in the middle of their own conversation, which is the kind of
+         * thing that makes an assistant feel like it is not listening.
+         */
         let finalText = textResponse;
         if (orderAction && !finalText) {
-            const map: Record<string, string> = {
-                checkout: "Certainly, Sir/Ma'am. I am opening your billing summary for review. 📝",
-                confirm: "Thank you! Your order has been confirmed and sent to our kitchen. 👨‍🍳",
-                update_info: "I have updated your information. Thank you. ✍️",
-                add: "Certainly, I've added that to your cart. Would you like anything else? 🛒",
-                remove: "Removed from your cart. Anything else? 🛒",
-                browse_menu: "Of course, I am opening our menu for you now. 📖"
+            const english: Record<string, string> = {
+                add: 'Added to your basket, Sir/Ma\'am. Anything else?',
+                remove: 'Taken off your basket. Anything else?',
+                set_quantity: 'Updated, Sir/Ma\'am. Anything else?',
+                set_notes: 'Noted, Sir/Ma\'am. Anything else?',
+                checkout: 'Here is your order summary for review, Sir/Ma\'am.',
+                update_info: 'Thank you, I have that saved.',
+                browse_menu: 'Here is our menu, Sir/Ma\'am — tell me what you would like and I will add it for you.',
+                confirm: 'Thank you, Sir/Ma\'am. Your order is with the kitchen.',
             };
-            finalText = map[orderAction.action] || "One moment please, I am processing that...";
+            const bengali: Record<string, string> = {
+                add: 'বাস্কেটে যোগ করা হয়েছে, স্যার/ম্যা\u2019ম। আর কিছু লাগবে?',
+                remove: 'বাস্কেট থেকে বাদ দেওয়া হয়েছে। আর কিছু লাগবে?',
+                set_quantity: 'পরিমাণ আপডেট করা হয়েছে, স্যার/ম্যা\u2019ম। আর কিছু লাগবে?',
+                set_notes: 'নোট করা হয়েছে, স্যার/ম্যা\u2019ম। আর কিছু লাগবে?',
+                checkout: 'এই হলো আপনার অর্ডার, স্যার/ম্যা\u2019ম।',
+                update_info: 'ধন্যবাদ, তথ্যগুলো সংরক্ষণ করা হয়েছে।',
+                browse_menu: 'এই হলো আমাদের মেনু, স্যার/ম্যা\u2019ম। যা খুশি বলুন, আমি যোগ করে দিব।',
+                confirm: 'ধন্যবাদ, স্যার/ম্যা\u2019ম। আপনার অর্ডারটি কিচেনে পৌঁছে গেছে।',
+            };
+            const table = guestWritesBengali(history) ? bengali : english;
+            finalText = table[orderAction.action]
+                ?? (guestWritesBengali(history)
+                    ? 'একটু সময় দিন, স্যার/ম্যা\u2019ম\u2014আপনার অর্ডারটি আপডেট করছি।'
+                    : "One moment, Sir/Ma'am — I am just updating your order.");
         }
 
         // Corrections the model needs to hear: an invented item code, a clamped quantity, an
@@ -407,10 +414,16 @@ export async function getLogicResponse(history: ChatMessage[], currentOrder: Ord
             finalText = `${finalText}\n\n${notices.join(' ')}`;
         }
 
-        return { text: finalText, orderAction, meta: { source: 'model', aiAvailable: true, latencyMs } };
+        // Token accounting, when the provider reports it. Cheap to read and the only way to
+        // tell a model swap apart from a cost change, since the menu dominates the input.
+        const usage = readUsage(modelResponse, MODEL);
+
+        return { text: finalText, orderAction, meta: { source: 'model', aiAvailable: true, latencyMs, ...(usage ? { usage } : {}) } };
 
     } catch (error: unknown) {
-        const engineError = toEngineError(error);
+        // Forward the provider's own retry hint so the guest and any polling client are told
+        // the real wait rather than a vague one.
+        const engineError = toEngineError(error, readRetryAfterSeconds(error));
         console.error(`[engine] ${engineError.code}`, error);
         return degradedReply(engineError);
     } finally {

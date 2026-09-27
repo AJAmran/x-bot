@@ -201,3 +201,53 @@ describe('getChatResponse — the key-less demo path', () => {
         await expect(ChatService.getChatResponse([])).resolves.toBeTruthy();
     });
 });
+
+describe('section navigation carries a usable target', () => {
+    /*
+     * A guest asking for "soups" was shown the whole of Chinese. The reply said "here is the
+     * Soup section" while the action it returned named only a category, so the card fell back
+     * to the first category and rendered salads. Both halves of the contract are asserted
+     * here: the text and the action have to agree.
+     */
+    const soup = RESTAURANT_DATA.menu.categories
+        .flatMap(c => (c.kind === 'nested' ? c.subcategories : []))
+        .find(s => /soup/i.test(s.name));
+
+    it('the data actually has a soup subcategory to ask for', () => {
+        expect(soup, 'fixture assumes a Soup subcategory exists').toBeDefined();
+    });
+
+    it.each([
+        ['soup', /soup/i],
+        ['show me the soups please', /soup/i],
+        ['what soups do you have?', /soup/i],
+    ])('%s resolves to a subcategory, not just a category', (input) => {
+        const res = ChatService.checkStaticIntent(input);
+        expect(res, `"${input}" was not understood locally`).not.toBeNull();
+        expect(res!.orderAction?.action).toBe('browse_menu');
+        expect(res!.orderAction?.subcategory_id, 'subcategory_id was dropped').toBe(soup!.id);
+    });
+
+    it('promises the section it actually opens', () => {
+        const res = ChatService.checkStaticIntent('soup menu');
+        expect(res!.text.toLowerCase()).toContain('soup');
+    });
+});
+
+describe('guest-facing copy is free of emoji', () => {
+    /*
+     * These strings are rendered into a business transaction, and several had picked up
+     * encoding damage on the way into the file. Asserting the absence is the only way to stop
+     * it creeping back in.
+     */
+    const prompts = [
+        'soup', 'show me the menu', 'full menu', 'menu',
+        'checkout', 'my bag', 'opening hours', 'where are you', 'phone number', 'call you',
+    ];
+
+    it.each(prompts)('"%s" replies without emoji', (input) => {
+        const res = ChatService.checkStaticIntent(input);
+        if (!res) return;
+        expect(res.text, `emoji or mojibake in reply to "${input}"`).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{FFFD}]/u);
+    });
+});

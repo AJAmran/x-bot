@@ -126,3 +126,48 @@ export function consumeAiQuota(clientId: string): RateLimitDecision {
 
     return { allowed: true, scope: 'client', retryAfterSeconds: 0 };
 }
+
+/**
+ * A second, independent limiter for the kitchen-notification endpoint.
+ *
+ * Deliberately NOT the AI quota above. Sharing one bucket would mean a script hammering
+ * /api/order-notify could exhaust the Gemini allowance and take the chat offline for every real
+ * guest — an abuse of the cheapest endpoint disabling the most expensive one. The two budgets are
+ * separate because the two resources are separate.
+ *
+ * Tighter than the AI limit on purpose: a person places one order and gets one notification, so a
+ * handful per minute from one address is already a script.
+ */
+const NOTIFY_LIMITS = { capacity: 3, refillPerMinute: 1 } as const;
+const notifyBuckets = new Map<string, Bucket>();
+
+export function consumeNotifyQuota(clientId: string): RateLimitDecision {
+    const now = Date.now();
+
+    let bucket = notifyBuckets.get(clientId);
+    if (!bucket) {
+        bucket = { tokens: NOTIFY_LIMITS.capacity, updatedAt: now };
+        notifyBuckets.set(clientId, bucket);
+    }
+    refill(bucket, NOTIFY_LIMITS.capacity, NOTIFY_LIMITS.refillPerMinute, now);
+
+    if (bucket.tokens < 1) {
+        return {
+            allowed: false,
+            scope: 'client',
+            retryAfterSeconds: secondsUntilToken(bucket, NOTIFY_LIMITS.refillPerMinute),
+        };
+    }
+
+    bucket.tokens -= 1;
+    // Same bound on memory as the AI buckets, so a flood of unique addresses cannot grow this
+    // map without limit on a warm instance.
+    if (notifyBuckets.size <= 500) {
+        const cutoff = now - 10 * MINUTE_MS;
+        for (const [key, stale] of notifyBuckets) {
+            if (stale.updatedAt < cutoff) notifyBuckets.delete(key);
+        }
+    }
+
+    return { allowed: true, scope: 'client', retryAfterSeconds: 0 };
+}

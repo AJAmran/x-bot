@@ -233,3 +233,89 @@ describe('parseManageOrderArgs — pass-through actions', () => {
         expect(parseManageOrderArgs({ action: 'checkout', isAdmin: true, role: 'root' }).action).toEqual({ action: 'checkout' });
     });
 });
+
+describe('parseManageOrderArgs - a verb that resolves to nothing', () => {
+    /*
+     * The worst failure mode is a silent one: the waiter says "added" and the basket does not
+     * change, so the guest believes their order is recorded when it is not.
+     */
+    it('says so instead of applying an empty item list quietly', () => {
+        const parsed = parseManageOrderArgs({ action: 'add', items: [] });
+        expect(parsed.action?.items).toEqual([]);
+        expect(parsed.notices.join(' ')).toMatch(/could not tell which dish/i);
+    });
+
+    it('does not double-report when the code was the problem', () => {
+        // The unknown-code notice already explains it; a second generic one is noise.
+        const parsed = parseManageOrderArgs({ action: 'add', items: [{ item_code: 'ZZZ-9' }] });
+        expect(parsed.unknownItemCodes).toEqual(['ZZZ-9']);
+        expect(parsed.notices).toHaveLength(1);
+        expect(parsed.notices[0]).toMatch(/couldn't find/i);
+    });
+});
+
+describe('parseManageOrderArgs - phone handling', () => {
+    it('normalises a spaced number so the order validator accepts it later', () => {
+        const parsed = parseManageOrderArgs({
+            action: 'update_info',
+            customer_details: { phone: '01712 345-678' },
+        });
+        expect(parsed.action?.customer_details?.phone).toBe('01712345678');
+        expect(parsed.notices).toHaveLength(0);
+    });
+
+    it('keeps an unusable number but asks for a proper one', () => {
+        // Dropping it would lose the fact that a number was given, and "12" is usually a
+        // partial one rather than a wrong one.
+        const parsed = parseManageOrderArgs({
+            action: 'update_info',
+            customer_details: { phone: '017' },
+        });
+        expect(parsed.action?.customer_details?.phone).toBe('017');
+        expect(parsed.notices.join(' ')).toMatch(/Bangladeshi mobile number/i);
+    });
+
+    it('accepts a +880 prefixed number', () => {
+        const parsed = parseManageOrderArgs({
+            action: 'update_info',
+            customer_details: { phone: '+8801712345678' },
+        });
+        expect(parsed.notices).toHaveLength(0);
+    });
+});
+describe('parseManageOrderArgs - repairing section names the model gets nearly right', () => {
+    /*
+     * Observed live: asked for `category_id`, the model answered "Chinese" where the id is
+     * "chinese". The exact-match check rejected it and the guest was told a section they could
+     * see did not exist. A near-miss has to be repaired, not discarded.
+     */
+    it('accepts a display name where an id was expected', () => {
+        const parsed = parseManageOrderArgs({ action: 'browse_menu', category_id: 'Chinese' });
+        expect(parsed.action?.category_id).toBe('chinese');
+        expect(parsed.notices).toHaveLength(0);
+    });
+
+    it('is case and spacing insensitive', () => {
+        expect(parseManageOrderArgs({ action: 'browse_menu', category_id: 'BEVERAGES' }).action?.category_id)
+            .toBe('beverages');
+    });
+
+    it('resolves a subcategory from its display name', () => {
+        const parsed = parseManageOrderArgs({ action: 'browse_menu', category_id: 'chinese', subcategory_id: 'Soup' });
+        expect(parsed.action?.subcategory_id).toBeDefined();
+        expect(parsed.notices).toHaveLength(0);
+    });
+
+    it('still refuses something that is not a section at all', () => {
+        const parsed = parseManageOrderArgs({ action: 'browse_menu', category_id: 'italian' });
+        expect(parsed.action?.category_id).toBeUndefined();
+        expect(parsed.notices.join(' ')).toMatch(/don't have a "italian" section/i);
+    });
+
+    it('complains when a subcategory is bogus, instead of silently widening the list', () => {
+        // Silently dropping it is what showed a whole category of salads for a soup request.
+        const parsed = parseManageOrderArgs({ action: 'browse_menu', category_id: 'chinese', subcategory_id: 'desserts' });
+        expect(parsed.action?.subcategory_id).toBeUndefined();
+        expect(parsed.notices.join(' ')).toMatch(/don't have a "desserts" part/i);
+    });
+});

@@ -106,3 +106,51 @@ describe('consumeAiQuota — daily budget', () => {
         expect(consumeAiQuota('1.1.1.1').allowed).toBe(true);
     });
 });
+
+describe('consumeNotifyQuota - the kitchen endpoint is a spam surface without it', () => {
+    it('allows a normal order, then throttles a flood from one address', async () => {
+        const { consumeNotifyQuota } = await loadLimiter();
+        const id = 'notify-flood';
+
+        // A person places one order and triggers one notification; three is generous.
+        expect(consumeNotifyQuota(id).allowed).toBe(true);
+        expect(consumeNotifyQuota(id).allowed).toBe(true);
+        expect(consumeNotifyQuota(id).allowed).toBe(true);
+
+        const blocked = consumeNotifyQuota(id);
+        expect(blocked.allowed).toBe(false);
+        expect(blocked.retryAfterSeconds).toBeGreaterThan(0);
+    });
+
+    it('gives every address its own bucket, so one guest cannot silence another', async () => {
+        const { consumeNotifyQuota } = await loadLimiter();
+        const flooder = 'notify-noisy';
+        for (let i = 0; i < 4; i++) consumeNotifyQuota(flooder);
+
+        expect(consumeNotifyQuota(flooder).allowed).toBe(false);
+        expect(consumeNotifyQuota('notify-quiet').allowed).toBe(true);
+    });
+
+    it('refills over time, so a throttled guest is not locked out for good', async () => {
+        const { consumeNotifyQuota } = await loadLimiter();
+        const id = 'notify-refill';
+        for (let i = 0; i < 4; i++) consumeNotifyQuota(id);
+        expect(consumeNotifyQuota(id).allowed).toBe(false);
+
+        vi.setSystemTime(clock + 61_000);
+        expect(consumeNotifyQuota(id).allowed).toBe(true);
+    });
+
+    it('is independent of the AI budget, so notification spam cannot take the chat offline', async () => {
+        // The whole reason for a second bucket: exhausting the kitchen notification must not
+        // consume an AI call, or a script on the cheapest endpoint disables the expensive one.
+        const { consumeAiQuota, consumeNotifyQuota } = await loadLimiter();
+
+        const flooder = 'notify-vs-ai';
+        for (let i = 0; i < 6; i++) consumeNotifyQuota(flooder);
+        expect(consumeNotifyQuota(flooder).allowed).toBe(false);
+
+        // The AI budget is untouched: a real guest can still talk to the waiter.
+        expect(consumeAiQuota('ai-still-works').allowed).toBe(true);
+    });
+});
